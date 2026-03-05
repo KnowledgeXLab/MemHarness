@@ -1,0 +1,3 @@
+[submodule "AgentGym"]
+	path = AgentGym
+	url = https://github.com/Edaizi/AgentGym
