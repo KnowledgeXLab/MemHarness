@@ -1,0 +1,43 @@
+data:
+  train_batch_size: 16
+  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
+  micro_batch_size_per_gpu: 2  # this is also val batch size
+  train_files: null
+  prompt_key: conversations
+  max_length: 4096
+  truncation: right
+  balance_dp_token: False
+  chat_template: null
+model:
+  partial_pretrain: null
+  fsdp_config:
+    wrap_policy:
+      min_num_params: 0
+    cpu_offload: False
+    offload_params: False
+  external_lib: null
+  enable_gradient_checkpointing: False
+  trust_remote_code: False
+  lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
+  lora_alpha: 16  # LoRA scaling factor
+  target_modules: all-linear  # Target modules for LoRA adaptation
+  use_liger: False
+optim:
+  lr: 1e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.01
+  warmup_steps_ratio: 0.1
+  clip_grad: 1.0
+ulysses_sequence_parallel_size: 1
+use_remove_padding: False
+trainer:
+  default_local_dir: null
+  resume_path: null
+  project_name: verl_agent_sft
+  experiment_name: verl_agent_sft
+  total_epochs: 1
+  total_training_steps: null
+  logger: ['console']
+  seed: 1
+  storage_mode: local
+
