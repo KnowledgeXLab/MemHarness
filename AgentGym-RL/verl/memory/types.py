@@ -17,6 +17,7 @@ class MemoryRecord:
     reward: float  # Final episode reward associated with the memory.
     success: bool  # Whether the source episode is considered successful.
     created_step: int | str | None = None  # Trainer global step or eval batch tag.
+    created_at: int | None = None  # The timestamp when the memory was created.
     retrieval_count: int = 0  # Number of times this memory was retrieved in-process.
     last_used_step: int | str | None = None  # Reserved field for future usage tracking.
     metadata: dict[str, Any] = field(default_factory=dict)  # Extra debug or provenance info.

@@ -78,7 +78,7 @@ rollout:
       retrieval_query_open_tag: "<memory_retrieve>"
       retrieval_query_close_tag: "</memory_retrieve>"
       top_k: 3
-      min_retrieval_score: 0.1
+      min_retrieval_score: 0
       max_pairs_per_episode: 8
       max_query_chars: 1200
       max_state_chars: 1200

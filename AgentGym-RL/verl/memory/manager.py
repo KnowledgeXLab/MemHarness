@@ -35,6 +35,7 @@ class RolloutMemoryManager:
         self.task_name = task_name
         self.rollout_log_dir = rollout_log_dir
         self.rank = rank
+        self.current_step: int | None = None
         self.enabled = bool(memory_config and memory_config.enabled)
         self.store = None
         self.writer_rank = int(memory_config.writer_rank) if self.enabled else 0
@@ -76,8 +77,9 @@ class RolloutMemoryManager:
             dist.barrier()
 
     def refresh(self, current_step: int | None = None) -> None:
+        self.current_step = self._normalize_step(current_step)
         if self.store is not None:
-            self.store.sync(current_step=self._normalize_step(current_step))
+            self.store.sync(current_step=self.current_step)
 
     def build_memory_message(self, state_text: str, round_idx: int) -> tuple[str, MemoryEvent | None]:
         if self.store is None:
@@ -90,6 +92,8 @@ class RolloutMemoryManager:
         retrieved = self.store.retrieve(query_text=query_text)
         if not retrieved:
             return "", None
+
+        self._mark_retrieved_memories(retrieved)
 
         injected_text = self._format_memory_prompt(retrieved)
         event = MemoryEvent(
@@ -184,8 +188,14 @@ class RolloutMemoryManager:
             self.store.add_records(merged_records)
 
     def finalize_step(self, current_step: int | None) -> None:
+        self.current_step = self._normalize_step(current_step)
         if self.store is not None:
-            self.store.sync(current_step=self._normalize_step(current_step))
+            self.store.sync(current_step=self.current_step)
+
+    def update_memory_records(self, updates: list[dict]) -> int:
+        if self.store is None:
+            return 0
+        return self.store.update_records(updates)
 
     # TODO
     def _compose_memory_text(self, state_text: str, action_text: str) -> str:
@@ -236,3 +246,21 @@ class RolloutMemoryManager:
             if rank_records:
                 merged_records.extend(rank_records)
         return merged_records
+
+    def close(self) -> None:
+        if self.store is not None:
+            self.store.close()
+
+    def _mark_retrieved_memories(self, retrieved: list[RetrievedMemory]) -> None:
+        updates: list[dict] = []
+        last_used_step = self.current_step
+        for memory in retrieved:
+            updates.append(
+                {
+                    "memory_id": memory.memory_id,
+                    "_increment_retrieval_count": 1,
+                    "last_used_step": last_used_step,
+                }
+            )
+        if updates:
+            self.update_memory_records(updates)

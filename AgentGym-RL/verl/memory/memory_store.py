@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import atexit
 import json
+import logging
 import os
 import re
 import time
@@ -73,6 +75,15 @@ class BaseMemoryStore:
     def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
         raise NotImplementedError
 
+    def update_records(self, updates: Iterable[dict]) -> int:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+    def delete_records(self, memory_ids: Iterable[str]) -> int:
+        raise NotImplementedError
+
 
 # TODO: Implement this class
 class RemoteHTTPMemoryStore(BaseMemoryStore):
@@ -137,6 +148,17 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
     def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
         del source_path, source_collection_name
         raise NotImplementedError("HTTP memory backend does not support local rebuild.")
+
+    def update_records(self, updates: Iterable[dict]) -> int:
+        del updates
+        raise NotImplementedError("HTTP memory backend does not support local update_records.")
+
+    def close(self) -> None:
+        return
+
+    def delete_records(self, memory_ids: Iterable[str]) -> int:
+        del memory_ids
+        raise NotImplementedError("Delete VDB interface is reserved but not implemented.")
 
 
 class RemoteEmbeddingProvider:
@@ -225,12 +247,24 @@ class MilvusMemoryStore(BaseMemoryStore):
         )
         self.retrieve_key = retrieve_key
 
-
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.client = MilvusClient(self.db_path)
+        self.log_path = os.path.join(
+            os.path.dirname(self.db_path),
+            f"{os.path.splitext(os.path.basename(self.db_path))[0]}.log",
+        )
+        self.logger = self._build_logger()
+        self.logger.info(
+            "Initialized MilvusMemoryStore db_path=%s collection_name=%s can_write=%s",
+            self.db_path,
+            self.collection_name,
+            self.can_write,
+        )
+        atexit.register(self.close)
 
     def initialize(self, mode: str) -> None:
         if not self.can_write:
+            self.logger.info("Skip initialize because can_write=False")
             return
 
         normalized_mode = str(mode).strip().lower()
@@ -241,9 +275,11 @@ class MilvusMemoryStore(BaseMemoryStore):
             )
 
         collections = set(self.client.list_collections())
+        self.logger.info("Initialize collection with mode=%s existing_collections=%s", normalized_mode, sorted(collections))
         if normalized_mode == "recreate" and self.collection_name in collections:
             self.client.drop_collection(self.collection_name)
             collections.remove(self.collection_name)
+            self.logger.info("Dropped existing collection %s before recreate", self.collection_name)
 
         if normalized_mode == "load_only":
             if self.collection_name not in collections:
@@ -251,10 +287,12 @@ class MilvusMemoryStore(BaseMemoryStore):
                     f"Milvus collection {self.collection_name} does not exist in {self.db_path} "
                     f"but mode=load_only requires an existing collection."
                 )
+            self.logger.info("Loaded existing collection %s in load_only mode", self.collection_name)
             return
 
         if self.collection_name not in collections:
             self._create_collection()
+            self.logger.info("Created collection %s", self.collection_name)
 
         if self.bootstrap_path and (
             normalized_mode == "recreate" or self._collection_count(self.collection_name) == 0
@@ -263,13 +301,14 @@ class MilvusMemoryStore(BaseMemoryStore):
                 source_path=self.bootstrap_path,
                 source_collection_name=self.bootstrap_collection_name,
             )
-            print(f"Bootstrapped {inserted} memory records from {self.bootstrap_path}")
+            self.logger.info("Bootstrapped %s memory records from %s", inserted, self.bootstrap_path)
 
     def sync(self, current_step: int | None) -> None:
-        pass
+        self.logger.info("Sync called current_step=%s", current_step)
 
     def add_records(self, records: Iterable[MemoryRecord]) -> None:
         if not self.can_write:
+            self.logger.info("Skip add_records because can_write=False")
             return
 
         buffered = list(records)
@@ -312,8 +351,9 @@ class MilvusMemoryStore(BaseMemoryStore):
 
         try:
             self.client.insert(collection_name=self.collection_name, data=entities)
+            self.logger.info("Inserted %s memory records into %s", len(entities), self.collection_name)
         except Exception as exc:
-            print(f"Failed to insert memory records into Milvus: {exc}")
+            self.logger.exception("Failed to insert memory records into Milvus: %s", exc)
 
     def retrieve(self, query_text: str) -> list[RetrievedMemory]:
         if not query_text:
@@ -341,7 +381,7 @@ class MilvusMemoryStore(BaseMemoryStore):
         try:
             results = self.client.search(**search_kwargs)
         except Exception as exc:
-            print(f"Failed to search memories from Milvus: {exc}")
+            self.logger.exception("Failed to search memories from Milvus: %s", exc)
             return []
 
         hits = results[0] if results else []
@@ -370,6 +410,7 @@ class MilvusMemoryStore(BaseMemoryStore):
                     value_source=entity.get("value_source"),
                 )
             )
+        self.logger.info("Retrieved %s memories for query length=%s", len(retrieved), len(query_text[:50]))
         return retrieved
 
     def export_jsonl(self, output_path: str, include_vectors: bool = True) -> int:
@@ -380,6 +421,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 exported += 1
+        self.logger.info("Exported %s records to %s include_vectors=%s", exported, output_path, include_vectors)
         return exported
 
     def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
@@ -387,10 +429,145 @@ class MilvusMemoryStore(BaseMemoryStore):
         if not os.path.exists(source_path):
             raise FileNotFoundError(f"Memory rebuild source does not exist: {source_path}")
         if source_path.endswith(".jsonl"):
-            return self._rebuild_from_jsonl(source_path)
+            rebuilt = self._rebuild_from_jsonl(source_path)
+            self.logger.info("Rebuilt %s records from jsonl source=%s", rebuilt, source_path)
+            return rebuilt
         if source_path.endswith(".db"):
-            return self._rebuild_from_db(source_path, source_collection_name=source_collection_name)
+            rebuilt = self._rebuild_from_db(source_path, source_collection_name=source_collection_name)
+            self.logger.info(
+                "Rebuilt %s records from db source=%s source_collection=%s",
+                rebuilt,
+                source_path,
+                source_collection_name or self.collection_name,
+            )
+            return rebuilt
         raise ValueError(f"Unsupported rebuild source: {source_path}")
+
+    def update_records(self, updates: Iterable[dict]) -> int:
+        buffered_updates = [dict(update) for update in updates if update and update["memory_id"]]
+        if not buffered_updates:
+            return 0
+        if not self.can_write:
+            self.logger.info("Skip update_records because can_write=False")
+            return 0
+
+        updated_entities: list[dict] = []
+        updated_ids: list[str] = []
+        for update in buffered_updates:
+            memory_id = str(update["memory_id"])
+            existing_rows = self.client.query(
+                collection_name=self.collection_name,
+                filter=f'memory_id == "{memory_id}"',
+                output_fields=[
+                    "memory_id",
+                    "task_name",
+                    "item_id",
+                    "source_episode_id",
+                    "source_step",
+                    "state_vector",
+                    "state_text",
+                    "action_text",
+                    "memory_text",
+                    "reward",
+                    "success",
+                    "created_step",
+                    "retrieval_count",
+                    "last_used_step",
+                    "metadata",
+                    "value",
+                    "value_source",
+                    "value_update_step",
+                    "created_at",
+                ],
+                limit=1,
+            )
+            if not existing_rows:
+                self.logger.warning("Skip update for missing memory_id=%s", memory_id)
+                continue
+
+            row = dict(existing_rows[0])
+            retrieval_increment = int(update["_increment_retrieval_count"])
+            if "metadata" in update and isinstance(update["metadata"], dict):
+                current_metadata = row.get("metadata", {})
+                if isinstance(current_metadata, str):
+                    try:
+                        current_metadata = json.loads(current_metadata)
+                    except json.JSONDecodeError:
+                        current_metadata = {}
+                if not isinstance(current_metadata, dict):
+                    current_metadata = {}
+                merged_metadata = dict(current_metadata)
+                merged_metadata.update(update["metadata"])
+                update = dict(update)
+                update["metadata"] = merged_metadata
+
+            for field in [
+                "task_name",
+                "item_id",
+                "source_episode_id",
+                "source_step",
+                "state_text",
+                "action_text",
+                "memory_text",
+                "reward",
+                "success",
+                "created_step",
+                "retrieval_count",
+                "last_used_step",
+                "metadata",
+                "value",
+                "value_source",
+                "value_update_step",
+                "created_at",
+            ]:
+                if field in update:
+                    row[field] = update[field]
+
+            if retrieval_increment:
+                row["retrieval_count"] = int(row["retrieval_count"]) + retrieval_increment
+
+            if self.retrieve_key in update and "state_vector" not in update:
+                row["state_vector"] = self.embedding_provider.get_embeddings([str(row[self.retrieve_key])])[0]
+            elif "state_vector" in update:
+                row["state_vector"] = update["state_vector"]
+
+            updated_entities.append(self._entity_from_row(row))
+            updated_ids.append(memory_id)
+
+        if not updated_entities:
+            return 0
+
+        expr = ", ".join(f'"{memory_id}"' for memory_id in updated_ids)
+        self.client.delete(collection_name=self.collection_name, filter=f"memory_id in [{expr}]")
+        self.client.insert(collection_name=self.collection_name, data=updated_entities)
+        self.logger.info("Updated %s memory records", len(updated_entities))
+        return len(updated_entities)
+
+    def close(self) -> None:
+        client = getattr(self, "client", None)
+        if client is not None:
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+            self.client = None
+
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            logger.info("Closed MilvusMemoryStore for db_path=%s", self.db_path)
+            for handler in list(logger.handlers):
+                try:
+                    handler.flush()
+                    handler.close()
+                finally:
+                    logger.removeHandler(handler)
+            self.logger = None
+
+    def delete_records(self, memory_ids: Iterable[str]) -> int:
+        del memory_ids
+        raise NotImplementedError("Delete VDB interface is reserved but not implemented.")
 
     def _create_collection(self) -> None:
         fields = [
@@ -424,6 +601,7 @@ class MilvusMemoryStore(BaseMemoryStore):
         index_params = MilvusClient.prepare_index_params()
         index_params.add_index(field_name="state_vector", index_type="FLAT", metric_type="COSINE")
         self.client.create_index(collection_name=self.collection_name, index_params=index_params)
+        self.logger.info("Created collection schema and index for %s", self.collection_name)
 
     def _collection_count(self, collection_name: str) -> int:
         try:
@@ -572,6 +750,17 @@ class MilvusMemoryStore(BaseMemoryStore):
             "created_at": int(row.get("created_at", int(time.time()))),
         }
 
+    def _build_logger(self) -> logging.Logger:
+        logger_name = f"verl.memory.milvus.{os.path.abspath(self.db_path)}"
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        if not logger.handlers:
+            handler = logging.FileHandler(self.log_path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+            logger.addHandler(handler)
+        return logger
+
 
 def _deserialize_retrieved_items(items: object) -> list[RetrievedMemory]:
     if not isinstance(items, list):
@@ -679,3 +868,12 @@ class VectorMemoryStore(BaseMemoryStore):
             source_path=source_path,
             source_collection_name=source_collection_name,
         )
+
+    def update_records(self, updates: Iterable[dict]) -> int:
+        return self.backend.update_records(updates)
+
+    def close(self) -> None:
+        self.backend.close()
+
+    def delete_records(self, memory_ids: Iterable[str]) -> int:
+        return self.backend.delete_records(memory_ids)
