@@ -1,4 +1,5 @@
 set -x
+export CUDA_VISIBLE_DEVICES=4,5
 export VLLM_USE_MODELSCOPE=0
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -10,7 +11,7 @@ source activate
 conda activate agentgym-rl
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
-env_server_url="http://127.0.0.1:36005"
+env_server_url="http://127.0.0.1:12453"
 
 sample_num=1
 max_rounds=30

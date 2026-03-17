@@ -12,11 +12,12 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[in
     return token_ids
 
 class Message:
-    def __init__(self, role: str, content: str):
+    def __init__(self, role: str, content: str, message_type: str = "generic"):
         self.role = role
         self.content = content
+        self.message_type = message_type
     def to_dict(self):
-        return {'role': self.role, 'content': self.content}
+        return {'role': self.role, 'content': self.content, 'message_type': self.message_type}
     def __repr__(self):
         return str(self.to_dict())
     def __str__(self):
@@ -64,6 +65,10 @@ class RolloutHandler:
         self.response_loss_mask = response_loss_mask
         self.max_response_len = max_response_len
         self.max_model_len = max_model_len  
+        self.memory_events: list[dict] = []
+        self.last_state_text: str = ""
+        self.memory_message_contents: set[str] = set()
+        self.memory_retrieval_action_contents: set[str] = set()
         self.format_config: dict = {
             "qwen": {
                 "assistat_prefix_msg": "\n<|im_start|>assistant\n",
@@ -85,8 +90,9 @@ class RolloutHandler:
         tokenizer: PreTrainedTokenizer,
         content: str,
         format: Literal["qwen"] = "qwen",
+        message_type: str = "env_action",
     ) -> None:
-        msg = Message(role='assistant', content=content)
+        msg = Message(role='assistant', content=content, message_type=message_type)
         self.messages.append(msg)
         assert format in self.format_config.keys(), f"format {format} not supported"
         prefix_msg = self.format_config[format]["assistat_prefix_msg"]
@@ -124,8 +130,9 @@ class RolloutHandler:
         tokenizer: PreTrainedTokenizer,
         content: str,
         format: Literal["qwen"] = "qwen",
+        message_type: str = "env_state",
     ) -> None:
-        msg = Message(role='user', content=content)
+        msg = Message(role='user', content=content, message_type=message_type)
         self.messages.append(msg)
         assert format in self.format_config.keys(), f"format {format} not supported"
         prefix_msg = self.format_config[format]["user_prefix_msg"]
@@ -159,6 +166,33 @@ class RolloutHandler:
         self.position_ids += _position_ids
         assert len(self.input_ids) == len(self.attention_mask) == len(self.position_ids) == len(self.loss_mask), f"""Rollout Handler has different length of {len(self.input_ids)=},
             {len(self.attention_mask)=}, {len(self.position_ids)=}, {len(self.loss_mask)=}"""
+        self.last_state_text = content
+
+    def add_memory_event(self, event: dict) -> None:
+        self.memory_events.append(event)
+
+    def add_memory_message(self, tokenizer: PreTrainedTokenizer, content: str, format: Literal["qwen"] = "qwen") -> None:
+        self.add_user_message(
+            tokenizer=tokenizer,
+            content=content,
+            format=format,
+            message_type="memory_prompt",
+        )
+        self.memory_message_contents.add(content)
+
+    def add_memory_retrieval_action(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        content: str,
+        format: Literal["qwen"] = "qwen",
+    ) -> None:
+        self.add_assistant_message(
+            tokenizer=tokenizer,
+            content=content,
+            format=format,
+            message_type="memory_retrieval_action",
+        )
+        self.memory_retrieval_action_contents.add(content)
         
     def truncate_output_ids(self) -> None:
         self.input_ids = self.input_ids[: self.max_model_len]

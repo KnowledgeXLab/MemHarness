@@ -52,6 +52,39 @@ rollout:
     n: 1 # > 1 for grpo
     send_interval: 1
     rollout_log_dir: null
+    memory:
+      enabled: False
+      backend: milvus
+      mode: init_if_missing   # choices: init_if_missing | recreate | load_only
+                              # init_if_missing: create collection when missing; bootstrap from bootstrap_path if current collection is empty
+                              # recreate: drop existing collection and rebuild it; if bootstrap_path is set, rebuild from that source immediately
+                              # load_only: require an existing collection in milvus_db_path and never create/rebuild it
+      store_dir: null
+      write_back: True
+      only_successful: True
+      only_store_positive_reward: True
+      vdb_base_url: null
+      vdb_timeout: 30
+      milvus_db_path: null
+      collection_name: null
+      bootstrap_path: null
+      bootstrap_collection_name: null
+      embedding_api_url: null
+      embedding_api_key: "empty"
+      embedding_model: bge_m3
+      embedding_dim: 1024
+      retrieval_mode: fixed
+      retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."
+      retrieval_query_open_tag: "<memory_retrieve>"
+      retrieval_query_close_tag: "</memory_retrieve>"
+      top_k: 3
+      min_retrieval_score: 0.1
+      max_pairs_per_episode: 8
+      max_query_chars: 1200
+      max_state_chars: 1200
+      max_action_chars: 400
+      max_memory_chars: 1200
+      prompt_header: "Relevant past experiences are provided below. Reuse them only if they are consistent with the current state."
 
 actor:
   strategy: fsdp  # This is for backward-compatibility

@@ -27,6 +27,7 @@ When working with Megatron:
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import List
+import re
 from omegaconf import DictConfig
 import torch
 import torch.distributed
@@ -46,6 +47,7 @@ import json
 import time
 import requests
 from copy import deepcopy
+from verl.memory import RolloutMemoryManager
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.torch_functional import get_eos_mask, pad_sequence_to_length
 from verl.utils.agentgym.client import init_env_client
@@ -130,7 +132,57 @@ class vLLMRollout(BaseRollout):
         self.pad_token_id = tokenizer.pad_token_id
 
         self.tokenizer = tokenizer
+        self.rank = torch.distributed.get_rank()
+        self.memory_manager = RolloutMemoryManager(
+            memory_config=self.config.get("memory", None),
+            task_name=self.agentgym_config.task_name,
+            rollout_log_dir=self.config.get("rollout_log_dir", None),
+            rank=self.rank,
+        )
 
+    def _inject_memory_context(
+        self,
+        rollout_handler: RolloutHandler,
+        state_text: str,
+        round_idx: int,
+        query_text: str | None = None,
+    ) -> None:
+        if not self.memory_manager.enabled:
+            return
+        memory_text, event = self.memory_manager.build_memory_message(
+            state_text=state_text,
+            round_idx=round_idx,
+            query_text=query_text,
+        )
+        if not memory_text:
+            return
+        rollout_handler.add_memory_message(self.tokenizer, memory_text)
+        if event is not None:
+            rollout_handler.add_memory_event(event.to_dict())
+
+    def _memory_retrieval_mode(self) -> str:
+        if not self.memory_manager.enabled:
+            return "disabled"
+        return str(self.config.memory.retrieval_mode).strip().lower()
+
+    def _append_memory_retrieval_hint(self, state_text: str) -> str:
+        hint_template = self.config.memory.retrieval_instruction_prompt
+        if not hint_template:
+            raise ValueError("retrieval_instruction_prompt is not set")
+        open_tag = self.config.memory.retrieval_query_open_tag
+        close_tag = self.config.memory.retrieval_query_close_tag
+        hint_text = hint_template.format(open_tag=open_tag, close_tag=close_tag)
+        return f"{state_text}\n\n{hint_text}"
+
+    def _extract_memory_query(self, response_text: str) -> str | None:
+        open_tag = self.config.memory.retrieval_query_open_tag
+        close_tag = self.config.memory.retrieval_query_close_tag
+        pattern = re.escape(open_tag) + r"(.*?)" + re.escape(close_tag)
+        match = re.search(pattern, response_text, flags=re.DOTALL)
+        if not match:
+            return None
+        query = match.group(1).strip()
+        return query or None
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -159,7 +211,7 @@ class vLLMRollout(BaseRollout):
                 position_ids = compute_position_id_with_mask(torch.tensor(attention_mask)).tolist()
                 handler = RolloutHandler(
                     messages=[
-                        Message(role=prompt["role"], content=prompt["content"]) for prompt in raw_prompt
+                        Message(role=prompt["role"], content=prompt["content"], message_type="prompt") for prompt in raw_prompt
                     ],
                     task_name=prompts.non_tensor_batch["item_id"][i].split("_")[0],
                     item_id=int(prompts.non_tensor_batch["item_id"][i].split("_")[-1]),
@@ -209,6 +261,9 @@ class vLLMRollout(BaseRollout):
         # repeat for self.config.n times to rollout
         batch_size = prompts.batch['input_ids'].size(0)
         batch_size *= self.config.n
+
+        self.memory_manager.refresh(current_step=global_steps if isinstance(global_steps, int) else None)
+
         rollout_handler_ls = self.preprocess_prompt_to_rollout_handler(prompts, n=self.config.n)
         env_clients = [init_env_client(self.agentgym_config) for _ in range(batch_size)]
         time.sleep(self.config.send_interval) # take a break before sendng request
@@ -217,7 +272,11 @@ class vLLMRollout(BaseRollout):
             try:
                 env_clients[idx].reset(rollout_handler.item_id)
                 task = env_clients[idx].observe()
-                rollout_handler.add_user_message(self.tokenizer, task)
+                if self._memory_retrieval_mode() == "agentic":
+                    task = self._append_memory_retrieval_hint(task)
+                rollout_handler.add_user_message(self.tokenizer, task, message_type="env_state")
+                if self._memory_retrieval_mode() == "fixed":
+                    self._inject_memory_context(rollout_handler=rollout_handler, state_text=task, round_idx=0)
             except TimeoutError:
                 print(f"Reset Timeout: Webarena Env Timeout. item id = {rollout_handler.item_id}")
                 rollout_handler.done = True
@@ -226,10 +285,23 @@ class vLLMRollout(BaseRollout):
         rounds = 0
         task_rounds = [0] * batch_size
         rollout_bar = tqdm(total = max_rounds, desc="Running rounds", disable=torch.distributed.get_rank() != 0)
+
         def agent_step(i, idx):
             content = self.tokenizer.decode(response_ids[i], skip_special_tokens=True)
-            rollout_handler_ls[idx].add_assistant_message(self.tokenizer, content)
             task_rounds[idx] += 1
+            retrieval_mode = self._memory_retrieval_mode()
+            if retrieval_mode == "agentic":
+                query_text = self._extract_memory_query(content)
+                if query_text:
+                    rollout_handler_ls[idx].add_memory_retrieval_action(self.tokenizer, content)
+                    self._inject_memory_context(
+                        rollout_handler=rollout_handler_ls[idx],
+                        state_text=rollout_handler_ls[idx].last_state_text,
+                        round_idx=task_rounds[idx],
+                        query_text=query_text,
+                    )
+                    return False
+            rollout_handler_ls[idx].add_assistant_message(self.tokenizer, content, message_type="env_action")
             try:
                 step_output = env_clients[idx].step(content)
                 state, rollout_handler_ls[idx].score, rollout_handler_ls[idx].done = (
@@ -237,13 +309,18 @@ class vLLMRollout(BaseRollout):
                     step_output.reward,
                     step_output.done,
                 )
-                rollout_handler_ls[idx].add_user_message(self.tokenizer, state)
+                if retrieval_mode == "agentic":
+                    state = self._append_memory_retrieval_hint(state)
+                rollout_handler_ls[idx].add_user_message(self.tokenizer, state, message_type="env_state")
+                if retrieval_mode == "fixed":
+                    self._inject_memory_context(rollout_handler=rollout_handler_ls[idx], state_text=state, round_idx=task_rounds[idx])
                 return step_output.done
             except Exception as e:
                 rollout_handler_ls[idx].score = 0
                 rollout_handler_ls[idx].done = True
                 print(f"Rollou step Error: {e} item id = {rollout_handler_ls[idx].item_id}")
                 return True
+
         while rounds < max_rounds and not all_done_flag:
             # get generation prompt
             generation_prompt_idxs = []
@@ -277,8 +354,10 @@ class vLLMRollout(BaseRollout):
         rollout_bar.close()
         response_ids, response_attention_mask, response_position_ids, response_loss_mask = [], [], [], []
         scores, messages = [], []
+
+        new_records = []
         
-        for rollout_handler in rollout_handler_ls:
+        for idx, rollout_handler in enumerate(rollout_handler_ls):
             # check length
             rollout_handler.truncate_output_ids()
             assert len(rollout_handler.input_ids) == len(rollout_handler.attention_mask) == len(rollout_handler.position_ids) == len(rollout_handler.loss_mask), f"""Rollout Handler has different length of {len(rollout_handler.input_ids)=}, 
@@ -291,6 +370,20 @@ class vLLMRollout(BaseRollout):
             response_loss_mask.append(torch.tensor(rollout_handler.response_loss_mask, dtype=torch.int, device=cur_device))
             scores.append(rollout_handler.score)
             messages.append(rollout_handler.messages)
+            episode_id = f"{global_steps}_{self.rank}_{idx}_{rollout_handler.item_id}"
+            
+            ## TODO: Implement this function
+            # new_records.extend(
+            #     self.memory_manager.build_records_from_episode(
+            #         item_id=rollout_handler.item_id,
+            #         episode_id=episode_id,
+            #         messages=rollout_handler.messages,
+            #         ignored_user_contents=rollout_handler.memory_message_contents,
+            #         ignored_assistant_contents=rollout_handler.memory_retrieval_action_contents,
+            #         score=rollout_handler.score,
+            #         global_step=global_steps,
+            #     )
+            # )
         
         # pad to length
         response_ids = pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
@@ -325,6 +418,9 @@ class vLLMRollout(BaseRollout):
         for i in range(len(scores)):
             reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
 
+        self.memory_manager.add_records(new_records)
+        self.memory_manager.finalize_step(current_step=global_steps if isinstance(global_steps, int) else None)
+
         if global_steps:
             try:
                 os.makedirs(os.path.join(self.config.rollout_log_dir, f"step{global_steps}"), exist_ok=True)
@@ -334,7 +430,8 @@ class vLLMRollout(BaseRollout):
                         records = {
                             "item_id": rollout_handler_ls[idx].item_id,
                             "conversations": [msg.to_dict() for msg in msgs],
-                            "reward": scores[idx]
+                            "reward": scores[idx],
+                            "memory_events": rollout_handler_ls[idx].memory_events,
                         }
                         json_msg.append(records)
                     json.dump(json_msg, f, ensure_ascii=True, indent=4)

@@ -5,10 +5,13 @@ datasets
 dill
 flash-attn
 hydra-core
+httpx
 liger-kernel
 numpy
+openai
 pandas
 peft
+pymilvus
 pyarrow>=15.0.0
 pybind11
 pylatexenc
