@@ -33,7 +33,7 @@ def build_store(args: argparse.Namespace) -> VectorMemoryStore:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export or rebuild the local Milvus memory database.")
-    parser.add_argument("--action", default="rebuild", choices=["export", "rebuild"])
+    parser.add_argument("--action", default="export", choices=["export", "rebuild"])
     parser.add_argument(
         "--mode",
         default="init_if_missing",
@@ -49,11 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--store-dir", default=None)
     parser.add_argument("--db-path", default="data/MemAdaptor/alfworld_memory_test.db")
     parser.add_argument("--collection-name", default=None)
-    parser.add_argument("--source-path", default="data/MemAdaptor/alfworld_memory_test.jsonl")
+    parser.add_argument("--source-path", default=None)
     parser.add_argument("--source-collection-name", default=None)
-    parser.add_argument("--output-path", default=None)
+    parser.add_argument("--output-path", default="data/MemAdaptor/alfworld_memory_export_test.jsonl")
     parser.add_argument("--include-vectors", action="store_true")
-    parser.add_argument("--embedding-api-url", default="http://10.140.37.68:8081/v1/embeddings")
+    parser.add_argument("--embedding-api-url", default="http://10.140.37.68:8081/v1")
     parser.add_argument("--embedding-api-key", default="empty")
     parser.add_argument("--embedding-model", default="bge_m3")
     parser.add_argument("--embedding-dim", type=int, default=1024)

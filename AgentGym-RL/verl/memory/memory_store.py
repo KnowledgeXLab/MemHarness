@@ -227,7 +227,7 @@ class MilvusMemoryStore(BaseMemoryStore):
 
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self.client = MilvusClient(db_path=self.db_path)
+        self.client = MilvusClient(self.db_path)
 
     def initialize(self, mode: str) -> None:
         if not self.can_write:

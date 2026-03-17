@@ -1,7 +1,4 @@
 from pymilvus import MilvusClient
-client = MilvusClient("./milvus_demo.db")
-
-from pymilvus import MilvusClient
 import numpy as np
 
 client = MilvusClient("./milvus_demo.db")
