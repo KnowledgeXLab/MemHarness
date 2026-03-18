@@ -134,9 +134,9 @@ class vLLMRollout(BaseRollout):
         self.tokenizer = tokenizer
         self.rank = torch.distributed.get_rank()
         self.memory_manager = RolloutMemoryManager(
-            memory_config=self.config.get("memory", None),
+            memory_config=self.config.memory,
             task_name=self.agentgym_config.task_name,
-            rollout_log_dir=self.config.get("rollout_log_dir", None),
+            rollout_log_dir=self.config.rollout_log_dir,
             rank=self.rank,
         )
 

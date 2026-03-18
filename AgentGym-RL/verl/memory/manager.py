@@ -69,8 +69,6 @@ class RolloutMemoryManager:
             embedding_dim=memory_config.embedding_dim,
             retrieve_key=memory_config.retrieve_key,
             can_write=self.can_write,
-            bootstrap_path=memory_config.get("bootstrap_path", None),
-            bootstrap_collection_name=memory_config.get("bootstrap_collection_name", None),
         )
         self.store.initialize(mode=self.mode)
         if dist.is_available() and dist.is_initialized():

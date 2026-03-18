@@ -38,15 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action", default="rebuild", choices=["export", "rebuild"])
     parser.add_argument(
         "--mode",
-        default="init_if_missing",
+        default="recreate",
         choices=sorted(SUPPORTED_MILVUS_INIT_MODES),
         help=(
             "Milvus init mode: "
-            "init_if_missing=create collection when missing and optionally bootstrap if empty; "
-            "recreate=drop and rebuild collection from scratch; "
-            "load_only=require an existing collection and never create/rebuild it. "
-            "When action=rebuild, the script skips standalone initialize to avoid duplicate collection creation, "
-            "so load_only is invalid."
+            "init_if_missing=use existing collection or create if missing; "
+            "recreate=drop and rebuild collection from source (default for rebuild action)."
         ),
     )
     parser.add_argument("--task_name", default="sciworld")
@@ -88,8 +85,6 @@ def main() -> None:
             print(f"Exported {exported} records to {args.output_path}")
             return
 
-        if args.mode == "load_only":
-            raise ValueError("mode=load_only is invalid when action=rebuild")
         if not args.source_path:
             raise ValueError("--source_path is required when action=rebuild")
         

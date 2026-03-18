@@ -100,10 +100,9 @@ actor_rollout_ref:
     memory:
       enabled: False
       backend: milvus
-      mode: init_if_missing   # choices: init_if_missing | recreate | load_only
-                              # init_if_missing: create collection when missing; bootstrap from bootstrap_path if current collection is empty
-                              # recreate: drop existing collection and rebuild it; if bootstrap_path is set, rebuild from that source immediately
-                              # load_only: require an existing collection in milvus_db_path and never create/rebuild it
+      mode: init_if_missing   # choices: init_if_missing | recreate
+                              # init_if_missing: create collection when missing; use existing if present
+                              # recreate: drop and rebuild collection from source (bootstrap_path or rebuild manually)
       store_dir: null
       writer_rank: 0
       write_back: True
@@ -111,17 +110,15 @@ actor_rollout_ref:
       only_store_positive_reward: True
       vdb_base_url: null
       vdb_timeout: 30
-      retrieve_key: state_text
+      retrieve_key: "memory_text"  # choices: memory_text | state_text
       milvus_db_path: null
       collection_name: null   # if null, auto-generates as "agent_memories_{task_name}_{timestamp}"
       clean_before_init: False   # if True, remove existing db files in store_dir before initialization
-      bootstrap_path: null
-      bootstrap_collection_name: null
       embedding_api_url: null
       embedding_api_key: "empty"
       embedding_model: bge_m3
       embedding_dim: 1024
-      retrieval_mode: fixed
+      retrieval_mode: fixed  # choices: fixed | agentic, fixed means each turn use memory, agentic means agentic memory retrieval
       retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."
       retrieval_query_open_tag: "<memory_retrieve>"
       retrieval_query_close_tag: "</memory_retrieve>"

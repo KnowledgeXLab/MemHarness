@@ -52,7 +52,6 @@ def _normalize_collection_name(task_name: str, collection_name: str | None) -> s
 SUPPORTED_MILVUS_INIT_MODES = {
     "init_if_missing",
     "recreate",
-    "load_only",
 }
 
 
@@ -223,8 +222,6 @@ class MilvusMemoryStore(BaseMemoryStore):
         min_score: float = 0.1,
         retrieve_key: str = "memory_text",
         can_write: bool = True,
-        bootstrap_path: str | None = None,
-        bootstrap_collection_name: str | None = None,
         rebuild_insert_batch_size: int = 100,
         rebuild_embedding_batch_size: int = 64,
     ) -> None:
@@ -240,8 +237,6 @@ class MilvusMemoryStore(BaseMemoryStore):
         self.timeout = timeout
         self.embedding_dim = embedding_dim
         self.can_write = can_write
-        self.bootstrap_path = bootstrap_path
-        self.bootstrap_collection_name = bootstrap_collection_name
         self.rebuild_insert_batch_size = max(1, int(rebuild_insert_batch_size))
         self.rebuild_embedding_batch_size = max(1, int(rebuild_embedding_batch_size))
         self.embedding_provider = RemoteEmbeddingProvider(
@@ -292,27 +287,9 @@ class MilvusMemoryStore(BaseMemoryStore):
             collections.remove(self.collection_name)
             self.logger.info("Dropped existing collection %s before recreate", self.collection_name)
 
-        if normalized_mode == "load_only":
-            if self.collection_name not in collections:
-                raise ValueError(
-                    f"Milvus collection {self.collection_name} does not exist in {self.db_path} "
-                    f"but mode=load_only requires an existing collection."
-                )
-            self.logger.info("Loaded existing collection %s in load_only mode", self.collection_name)
-            return
-
         if self.collection_name not in collections:
             self._create_collection()
             self.logger.info("Created collection %s", self.collection_name)
-
-        if self.bootstrap_path and (
-            normalized_mode == "recreate" or self._collection_count(self.collection_name) == 0
-        ):
-            inserted = self.rebuild_from_path(
-                source_path=self.bootstrap_path,
-                source_collection_name=self.bootstrap_collection_name,
-            )
-            self.logger.info("Bootstrapped %s memory records from %s", inserted, self.bootstrap_path)
 
     def sync(self, current_step: int | None) -> None:
         self.logger.info("Sync called current_step=%s", current_step)
@@ -333,6 +310,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             print(f"Embedding count mismatch when inserting memory records, skipping insert. Expected {len(buffered)} vectors, got {len(state_vectors)}.")
             return
 
+        vector_field_name = self._vector_field_name
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         entities = []
         for index, record in enumerate(buffered):
@@ -343,7 +321,7 @@ class MilvusMemoryStore(BaseMemoryStore):
                     "item_id": int(record.item_id),
                     "source_episode_id": _safe_str(record.source_episode_id, 128),
                     "source_step": int(record.source_step),
-                    "state_vector": state_vectors[index],
+                    vector_field_name: state_vectors[index],
                     "state_text": _safe_str(record.state_text, 4096),
                     "action_text": _safe_str(record.action_text, 4096),
                     "memory_text": _safe_str(record.memory_text, 8192),
@@ -399,7 +377,7 @@ class MilvusMemoryStore(BaseMemoryStore):
         retrieved: list[RetrievedMemory] = []
         for hit in hits:
             entity = hit.get("entity", {})
-            score = _safe_float(hit.get("distance", hit.get("score", 0.0)))
+            score = _safe_float(1 - hit["distance"])
             if score < self.min_score:
                 continue
             metadata = entity.get("metadata", {})
@@ -467,6 +445,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             self.logger.info("Skip update_records because can_write=False")
             return 0
 
+        vector_field_name = self._vector_field_name
         updated_entities: list[dict] = []
         updated_ids: list[str] = []
         for update in buffered_updates:
@@ -480,7 +459,7 @@ class MilvusMemoryStore(BaseMemoryStore):
                     "item_id",
                     "source_episode_id",
                     "source_step",
-                    "state_vector",
+                    vector_field_name,
                     "state_text",
                     "action_text",
                     "memory_text",
@@ -517,6 +496,7 @@ class MilvusMemoryStore(BaseMemoryStore):
                 update = dict(update)
                 update["metadata"] = merged_metadata
 
+            vector_field_name = self._vector_field_name
             for field in [
                 "task_name",
                 "item_id",
@@ -542,10 +522,10 @@ class MilvusMemoryStore(BaseMemoryStore):
             if retrieval_increment:
                 row["retrieval_count"] = int(row["retrieval_count"]) + retrieval_increment
 
-            if self.retrieve_key in update and "state_vector" not in update:
-                row["state_vector"] = self.embedding_provider.get_embeddings([str(row[self.retrieve_key])])[0]
-            elif "state_vector" in update:
-                row["state_vector"] = update["state_vector"]
+            if self.retrieve_key in update and vector_field_name not in update:
+                row[vector_field_name] = self.embedding_provider.get_embeddings([str(row[self.retrieve_key])])[0]
+            elif vector_field_name in update:
+                row[vector_field_name] = update[vector_field_name]
 
             updated_entities.append(self._entity_from_row(row))
             updated_ids.append(memory_id)
@@ -585,14 +565,21 @@ class MilvusMemoryStore(BaseMemoryStore):
         del memory_ids
         raise NotImplementedError("Delete VDB interface is reserved but not implemented.")
 
+    @property
+    def _vector_field_name(self) -> str:
+        """根据 retrieve_key 生成向量字段名，如 state_text -> state_vector"""
+        base_name = self.retrieve_key.replace("_text", "")
+        return f"{base_name}_vector"
+
     def _create_collection(self) -> None:
+        vector_field_name = self._vector_field_name
         fields = [
             FieldSchema(name="memory_id", dtype=DataType.VARCHAR, is_primary=True, max_length=128),
             FieldSchema(name="task_name", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="item_id", dtype=DataType.INT64),
             FieldSchema(name="source_episode_id", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="source_step", dtype=DataType.INT64),
-            FieldSchema(name="state_vector", dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
+            FieldSchema(name=vector_field_name, dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
             FieldSchema(name="state_text", dtype=DataType.VARCHAR, max_length=4096),
             FieldSchema(name="action_text", dtype=DataType.VARCHAR, max_length=4096),
             FieldSchema(name="memory_text", dtype=DataType.VARCHAR, max_length=8192),
@@ -615,9 +602,9 @@ class MilvusMemoryStore(BaseMemoryStore):
             auto_id=False,
         )
         index_params = MilvusClient.prepare_index_params()
-        index_params.add_index(field_name="state_vector", index_type="FLAT", metric_type="COSINE")
+        index_params.add_index(field_name=vector_field_name, index_type="FLAT", metric_type="COSINE")
         self.client.create_index(collection_name=self.collection_name, index_params=index_params)
-        self.logger.info("Created collection schema and index for %s", self.collection_name)
+        self.logger.info("Created collection schema and index for %s (vector_field=%s, retrieve_key=%s)", self.collection_name, vector_field_name, self.retrieve_key)
 
     def _collection_count(self, collection_name: str) -> int:
         try:
@@ -660,7 +647,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             "created_at",
         ]
         if include_vectors:
-            output_fields.append("state_vector")
+            output_fields.append(self._vector_field_name)
 
         records: list[dict] = []
         offset = 0
@@ -844,13 +831,14 @@ class MilvusMemoryStore(BaseMemoryStore):
         metadata = row.get("metadata", {})
         if not isinstance(metadata, str):
             metadata = _json_dumps(metadata)
+        vector_field_name = self._vector_field_name
         return {
             "memory_id": _safe_str(row.get("memory_id"), 128),
             "task_name": _safe_str(row.get("task_name"), 128),
             "item_id": int(row.get("item_id", 0)),
             "source_episode_id": _safe_str(row.get("source_episode_id"), 128),
             "source_step": int(row.get("source_step", 0)),
-            "state_vector": row.get("state_vector"),
+            vector_field_name: row.get(vector_field_name),
             "state_text": _safe_str(row.get("state_text"), 4096),
             "action_text": _safe_str(row.get("action_text"), 4096),
             "memory_text": _safe_str(row.get("memory_text"), 8192),
@@ -922,10 +910,8 @@ class VectorMemoryStore(BaseMemoryStore):
         embedding_api_key: str = "empty",
         embedding_model: str = "bge_m3",
         embedding_dim: int = 1024,
-        retrieve_key: str = "state_text",
+        retrieve_key: str = "memory_text",
         can_write: bool = True,
-        bootstrap_path: str | None = None,
-        bootstrap_collection_name: str | None = None,
         rebuild_insert_batch_size: int = 100,
         rebuild_embedding_batch_size: int = 64,
     ) -> None:
@@ -962,8 +948,6 @@ class VectorMemoryStore(BaseMemoryStore):
             min_score=min_score,
             retrieve_key=retrieve_key,
             can_write=can_write,
-            bootstrap_path=bootstrap_path,
-            bootstrap_collection_name=bootstrap_collection_name,
             rebuild_insert_batch_size=rebuild_insert_batch_size,
             rebuild_embedding_batch_size=rebuild_embedding_batch_size,
         )

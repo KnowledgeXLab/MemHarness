@@ -1,43 +1,39 @@
 from pymilvus import MilvusClient
 import numpy as np
+from pymilvus import model
+
+embedding_fn = model.DefaultEmbeddingFunction()
 
 client = MilvusClient("./milvus_demo.db")
 client.create_collection(
     collection_name="demo_collection",
-    dimension=384  # The vectors we will use in this demo has 384 dimensions
+    dimension=768 
 )
 
 docs = [
-    "Artificial intelligence was founded as an academic discipline in 1956.",
-    "Alan Turing was the first person to conduct substantial research in AI.",
-    "Born in Maida Vale, London, Turing was raised in southern England.",
+    "Machine learning has been used for drug design.",
+    "Computational synthesis with AI algorithms predicts molecular properties.",
+    "DDR1 is involved in cancers and fibrosis.",
+]
+vectors = embedding_fn.encode_documents(docs)
+
+
+data = [
+    {"id": 3 + i, "vector": vectors[i], "text": docs[i], "subject": "biology"}
+    for i in range(len(vectors))
 ]
 
-vectors = [[ np.random.uniform(-1, 1) for _ in range(384) ] for _ in range(len(docs)) ]
-data = [ {"id": i, "vector": vectors[i], "text": docs[i], "subject": "history"} for i in range(len(vectors)) ]
-res = client.insert(
-    collection_name="demo_collection",
-    data=data
-)
+print(vectors[0].shape)
+
+client.insert(collection_name="demo_collection", data=data)
 
 res = client.search(
     collection_name="demo_collection",
-    data=[vectors[0]],
-    filter="subject == 'history'",
+    data=embedding_fn.encode_queries(["tell me AI related information"]),
+    filter="subject == 'biology'",
     limit=2,
     output_fields=["text", "subject"],
 )
+
 print(res)
 
-res = client.query(
-    collection_name="demo_collection",
-    filter="subject == 'history'",
-    output_fields=["text", "subject"],
-)
-print(res)
-
-res = client.delete(
-    collection_name="demo_collection",
-    filter="subject == 'history'",
-)
-print(res)
