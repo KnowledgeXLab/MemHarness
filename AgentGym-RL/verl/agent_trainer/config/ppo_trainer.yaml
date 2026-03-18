@@ -113,7 +113,8 @@ actor_rollout_ref:
       vdb_timeout: 30
       retrieve_key: state_text
       milvus_db_path: null
-      collection_name: null
+      collection_name: null   # if null, auto-generates as "agent_memories_{task_name}_{timestamp}"
+      clean_before_init: False   # if True, remove existing db files in store_dir before initialization
       bootstrap_path: null
       bootstrap_collection_name: null
       embedding_api_url: null
@@ -124,6 +125,8 @@ actor_rollout_ref:
       retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."
       retrieval_query_open_tag: "<memory_retrieve>"
       retrieval_query_close_tag: "</memory_retrieve>"
+      rebuild_insert_batch_size: 1000
+      rebuild_embedding_batch_size: 256
       top_k: 3
       min_retrieval_score: 0
       max_pairs_per_episode: 8

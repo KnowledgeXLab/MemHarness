@@ -27,13 +27,15 @@ def build_store(args: argparse.Namespace) -> VectorMemoryStore:
         embedding_model=args.embedding_model,
         embedding_dim=args.embedding_dim,
         retrieve_key=args.retrieve_key,
+        rebuild_insert_batch_size=args.rebuild_insert_batch_size,
+        rebuild_embedding_batch_size=args.rebuild_embedding_batch_size,
         can_write=True,
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export or rebuild the local Milvus memory database.")
-    parser.add_argument("--action", default="export", choices=["export", "rebuild"])
+    parser.add_argument("--action", default="rebuild", choices=["export", "rebuild"])
     parser.add_argument(
         "--mode",
         default="init_if_missing",
@@ -42,48 +44,66 @@ def parse_args() -> argparse.Namespace:
             "Milvus init mode: "
             "init_if_missing=create collection when missing and optionally bootstrap if empty; "
             "recreate=drop and rebuild collection from scratch; "
-            "load_only=require an existing collection and never create/rebuild it."
+            "load_only=require an existing collection and never create/rebuild it. "
+            "When action=rebuild, the script skips standalone initialize to avoid duplicate collection creation, "
+            "so load_only is invalid."
         ),
     )
-    parser.add_argument("--task-name", default="alfworld")
-    parser.add_argument("--store-dir", default=None)
-    parser.add_argument("--db-path", default="data/MemAdaptor/alfworld_memory_test.db")
-    parser.add_argument("--collection-name", default=None)
-    parser.add_argument("--source-path", default=None)
-    parser.add_argument("--source-collection-name", default=None)
-    parser.add_argument("--output-path", default="data/MemAdaptor/alfworld_memory_export_test.jsonl")
-    parser.add_argument("--include-vectors", action="store_true")
-    parser.add_argument("--embedding-api-url", default="http://10.140.37.68:8081/v1")
-    parser.add_argument("--embedding-api-key", default="empty")
-    parser.add_argument("--embedding-model", default="bge_m3")
-    parser.add_argument("--embedding-dim", type=int, default=1024)
-    parser.add_argument("--retrieve-key", default="state_text")
+    parser.add_argument("--task_name", default="sciworld")
+    parser.add_argument("--store_dir", default="data/AgentGym/AgentTraj-L/memadaptor_test")
+    parser.add_argument("--db_path", default=None, help="Path to the Milvus database file. Required when action=export.")
+    parser.add_argument("--collection_name", default=None)
+    parser.add_argument("--source_path", default="data/AgentGym/AgentTraj-L/sciworld_train_memory_records-gpt-5.1.jsonl", help="Path to the source JSONL file. Required when action=rebuild.")
+    parser.add_argument("--source_collection_name", default=None)
+    parser.add_argument("--output_path", default=None)
+    parser.add_argument("--include_vectors", action="store_true")
+    parser.add_argument("--embedding_api_url", default="http://10.140.37.68:8081/v1")
+    parser.add_argument("--embedding_api_key", default="empty")
+    parser.add_argument("--embedding_model", default="bge_m3")
+    parser.add_argument("--embedding_dim", type=int, default=1024)
+    parser.add_argument("--retrieve_key", default="state_text")
     parser.add_argument("--timeout", type=int, default=30)
-    parser.add_argument("--top-k", type=int, default=3)
-    parser.add_argument("--min-score", type=float, default=0.1)
-    parser.add_argument("--only-successful", action="store_true")
+    parser.add_argument("--top_k", type=int, default=3)
+    parser.add_argument("--min_score", type=float, default=0.1)
+    parser.add_argument("--only_successful", action="store_true")
+    parser.add_argument("--rebuild_insert_batch_size", type=int, default=1000)
+    parser.add_argument("--rebuild_embedding_batch_size", type=int, default=256)
+    parser.add_argument(
+        "--clean_before_init",
+        action="store_true",
+        help="If set, remove existing database files in store_dir before initialization.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     store = build_store(args)
-    store.initialize(mode=args.mode)
+    try:
+        if args.action == "export":
+            store.initialize(mode=args.mode, clean_before_init=args.clean_before_init)
+            if not args.output_path:
+                raise ValueError("--output_path is required when action=export")
+            exported = store.export_jsonl(output_path=args.output_path, include_vectors=args.include_vectors)
+            print(f"Exported {exported} records to {args.output_path}")
+            return
 
-    if args.action == "export":
-        if not args.output_path:
-            raise ValueError("--output-path is required when action=export")
-        exported = store.export_jsonl(output_path=args.output_path, include_vectors=args.include_vectors)
-        print(f"Exported {exported} records to {args.output_path}")
-        return
-
-    if not args.source_path:
-        raise ValueError("--source-path is required when action=rebuild")
-    rebuilt = store.rebuild_from_path(
-        source_path=args.source_path,
-        source_collection_name=args.source_collection_name,
-    )
-    print(f"Rebuilt {rebuilt} records into {args.db_path}")
+        if args.mode == "load_only":
+            raise ValueError("mode=load_only is invalid when action=rebuild")
+        if not args.source_path:
+            raise ValueError("--source_path is required when action=rebuild")
+        
+        # For rebuild action, clean_before_init is handled inside rebuild_from_path by dropping collection
+        # But we still pass it to initialize for consistency
+        store.initialize(mode=args.mode, clean_before_init=args.clean_before_init)
+        
+        rebuilt = store.rebuild_from_path(
+            source_path=args.source_path,
+            source_collection_name=args.source_collection_name,
+        )
+        print(f"Rebuilt {rebuilt} records into {args.db_path}")
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

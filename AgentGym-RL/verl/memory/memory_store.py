@@ -57,7 +57,7 @@ SUPPORTED_MILVUS_INIT_MODES = {
 
 
 class BaseMemoryStore:
-    def initialize(self, mode: str) -> None:
+    def initialize(self, mode: str, clean_before_init: bool = False) -> None:
         raise NotImplementedError
 
     def sync(self, current_step: int | None) -> None:
@@ -221,15 +221,19 @@ class MilvusMemoryStore(BaseMemoryStore):
         only_successful: bool = True,
         top_k: int = 3,
         min_score: float = 0.1,
-        retrieve_key: str = "state_text",
+        retrieve_key: str = "memory_text",
         can_write: bool = True,
         bootstrap_path: str | None = None,
         bootstrap_collection_name: str | None = None,
+        rebuild_insert_batch_size: int = 100,
+        rebuild_embedding_batch_size: int = 64,
     ) -> None:
         self.task_name = task_name
         self.store_dir = store_dir
         self.db_path = db_path or os.path.join(store_dir, "milvus_memory.db")
-        self.collection_name = _normalize_collection_name(task_name=task_name, collection_name=collection_name)
+        self.collection_name = _normalize_collection_name(
+            task_name=task_name, collection_name=collection_name, use_timestamp=(collection_name is None)
+        )
         self.only_successful = only_successful
         self.top_k = top_k
         self.min_score = min_score
@@ -238,6 +242,8 @@ class MilvusMemoryStore(BaseMemoryStore):
         self.can_write = can_write
         self.bootstrap_path = bootstrap_path
         self.bootstrap_collection_name = bootstrap_collection_name
+        self.rebuild_insert_batch_size = max(1, int(rebuild_insert_batch_size))
+        self.rebuild_embedding_batch_size = max(1, int(rebuild_embedding_batch_size))
         self.embedding_provider = RemoteEmbeddingProvider(
             api_url=embedding_api_url,
             api_key=embedding_api_key,
@@ -259,6 +265,11 @@ class MilvusMemoryStore(BaseMemoryStore):
             self.db_path,
             self.collection_name,
             self.can_write,
+        )
+        self.logger.info(
+            "Rebuild batch sizes embedding=%s insert=%s",
+            self.rebuild_embedding_batch_size,
+            self.rebuild_insert_batch_size,
         )
         atexit.register(self.close)
 
@@ -322,7 +333,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             print(f"Embedding count mismatch when inserting memory records, skipping insert. Expected {len(buffered)} vectors, got {len(state_vectors)}.")
             return
 
-        now = int(time.time())
+        now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         entities = []
         for index, record in enumerate(buffered):
             entities.append(
@@ -345,13 +356,13 @@ class MilvusMemoryStore(BaseMemoryStore):
                     "value": _safe_float(record.value),
                     "value_source": _safe_str(record.value_source, 64),
                     "value_update_step": _safe_str(record.value_update_step, 64),
-                    "created_at": now,
+                    "created_at": now_ts,
                 }
             )
 
         try:
-            self.client.insert(collection_name=self.collection_name, data=entities)
-            self.logger.info("Inserted %s memory records into %s", len(entities), self.collection_name)
+            inserted = self._insert_entities_in_batches(entities)
+            self.logger.info("Inserted %s memory records into %s", inserted, self.collection_name)
         except Exception as exc:
             self.logger.exception("Failed to insert memory records into Milvus: %s", exc)
 
@@ -428,23 +439,28 @@ class MilvusMemoryStore(BaseMemoryStore):
         source_path = os.path.abspath(source_path)
         if not os.path.exists(source_path):
             raise FileNotFoundError(f"Memory rebuild source does not exist: {source_path}")
-        if source_path.endswith(".jsonl"):
-            rebuilt = self._rebuild_from_jsonl(source_path)
-            self.logger.info("Rebuilt %s records from jsonl source=%s", rebuilt, source_path)
-            return rebuilt
-        if source_path.endswith(".db"):
-            rebuilt = self._rebuild_from_db(source_path, source_collection_name=source_collection_name)
-            self.logger.info(
-                "Rebuilt %s records from db source=%s source_collection=%s",
-                rebuilt,
-                source_path,
-                source_collection_name or self.collection_name,
-            )
-            return rebuilt
-        raise ValueError(f"Unsupported rebuild source: {source_path}")
+        self.logger.info("Start rebuild source=%s target_collection=%s", source_path, self.collection_name)
+        try:
+            if source_path.endswith(".jsonl"):
+                rebuilt = self._rebuild_from_jsonl(source_path)
+                self.logger.info("Rebuilt %s records from jsonl source=%s", rebuilt, source_path)
+                return rebuilt
+            if source_path.endswith(".db"):
+                rebuilt = self._rebuild_from_db(source_path, source_collection_name=source_collection_name)
+                self.logger.info(
+                    "Rebuilt %s records from db source=%s source_collection=%s",
+                    rebuilt,
+                    source_path,
+                    source_collection_name or self.collection_name,
+                )
+                return rebuilt
+            raise ValueError(f"Unsupported rebuild source: {source_path}")
+        except Exception as exc:
+            self.logger.exception("Failed rebuild from source=%s: %s", source_path, exc)
+            raise
 
     def update_records(self, updates: Iterable[dict]) -> int:
-        buffered_updates = [dict(update) for update in updates if update and update["memory_id"]]
+        buffered_updates = [dict(update) for update in updates if update and update.get("memory_id")]
         if not buffered_updates:
             return 0
         if not self.can_write:
@@ -486,7 +502,7 @@ class MilvusMemoryStore(BaseMemoryStore):
                 continue
 
             row = dict(existing_rows[0])
-            retrieval_increment = int(update["_increment_retrieval_count"])
+            retrieval_increment = int(update.get("_increment_retrieval_count", 0))
             if "metadata" in update and isinstance(update["metadata"], dict):
                 current_metadata = row.get("metadata", {})
                 if isinstance(current_metadata, str):
@@ -539,7 +555,7 @@ class MilvusMemoryStore(BaseMemoryStore):
 
         expr = ", ".join(f'"{memory_id}"' for memory_id in updated_ids)
         self.client.delete(collection_name=self.collection_name, filter=f"memory_id in [{expr}]")
-        self.client.insert(collection_name=self.collection_name, data=updated_entities)
+        self._insert_entities_in_batches(updated_entities)
         self.logger.info("Updated %s memory records", len(updated_entities))
         return len(updated_entities)
 
@@ -589,7 +605,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             FieldSchema(name="value", dtype=DataType.FLOAT),
             FieldSchema(name="value_source", dtype=DataType.VARCHAR, max_length=64),
             FieldSchema(name="value_update_step", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="created_at", dtype=DataType.INT64),
+            FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=64),
         ]
         schema = CollectionSchema(fields=fields, description="Memory records for rollout retrieval")
         self.client.create_collection(
@@ -681,37 +697,71 @@ class MilvusMemoryStore(BaseMemoryStore):
             include_vectors=True,
         )
         if not rows:
+            self.logger.info("Source db %s collection=%s is empty", source_db_path, source_collection)
             return 0
+        self.logger.info("Loaded %s rows from source db %s collection=%s", len(rows), source_db_path, source_collection)
         entities = [self._entity_from_row(row) for row in rows]
-        self.client.insert(collection_name=self.collection_name, data=entities)
-        return len(entities)
+        return self._insert_entities_in_batches(entities, progress_label="DB rebuild")
 
     def _rebuild_from_jsonl(self, source_jsonl_path: str) -> int:
         if self.collection_name in set(self.client.list_collections()):
             self.client.drop_collection(self.collection_name)
         self._create_collection()
 
-        rows: list[dict] = []
+        total_rows = self._count_non_empty_lines(source_jsonl_path)
+        self.logger.info(
+            "Start JSONL rebuild source=%s total_rows=%s embedding_batch_size=%s insert_batch_size=%s",
+            source_jsonl_path,
+            total_rows,
+            self.rebuild_embedding_batch_size,
+            self.rebuild_insert_batch_size,
+        )
+        if total_rows == 0:
+            return 0
+
+        rebuilt = 0
+        buffered_rows: list[dict] = []
         with open(source_jsonl_path, "r", encoding="utf-8") as handle:
-            for line in handle:
+            for line_no, line in enumerate(handle, start=1):
                 payload = line.strip()
                 if not payload:
                     continue
-                rows.append(json.loads(payload))
+                try:
+                    buffered_rows.append(json.loads(payload))
+                except json.JSONDecodeError as exc:
+                    self.logger.exception("Invalid jsonl at %s line=%s: %s", source_jsonl_path, line_no, exc)
+                    raise
 
-        if not rows:
-            return 0
+                if len(buffered_rows) >= self.rebuild_insert_batch_size:
+                    rebuilt += self._insert_jsonl_rows_chunk(
+                        rows=buffered_rows,
+                        inserted_so_far=rebuilt,
+                        total_rows=total_rows,
+                    )
+                    buffered_rows = []
 
-        entities = self._entities_from_payload_rows(rows)
-        self.client.insert(collection_name=self.collection_name, data=entities)
-        return len(entities)
+        if buffered_rows:
+            rebuilt += self._insert_jsonl_rows_chunk(
+                rows=buffered_rows,
+                inserted_so_far=rebuilt,
+                total_rows=total_rows,
+            )
+        return rebuilt
 
-    def _entities_from_payload_rows(self, rows: list[dict]) -> list[dict]:
+    def _insert_jsonl_rows_chunk(self, rows: list[dict], inserted_so_far: int, total_rows: int) -> int:
+        entities = self._entities_from_payload_rows(rows, progress_label="JSONL rebuild embedding")
+        inserted = self._insert_entities_in_batches(entities)
+        self.logger.info("JSONL rebuild progress inserted=%s/%s", inserted_so_far + inserted, total_rows)
+        return inserted
+
+    def _entities_from_payload_rows(self, rows: list[dict], progress_label: str | None = None) -> list[dict]:
         missing_vector_rows = [row for row in rows if "state_vector" not in row]
         embedded_vectors: list[list[float]] = []
         if missing_vector_rows:
-            embedded_vectors = self.embedding_provider.get_embeddings(
-                [str(row.get(self.retrieve_key, "state_text")) for row in missing_vector_rows]
+            embedded_vectors = self._get_embeddings_in_batches(
+                [str(row.get(self.retrieve_key, "")) for row in missing_vector_rows],
+                batch_size=self.rebuild_embedding_batch_size,
+                progress_label=progress_label,
             )
 
         entities: list[dict] = []
@@ -724,6 +774,72 @@ class MilvusMemoryStore(BaseMemoryStore):
             entities.append(self._entity_from_row(row_copy))
         return entities
 
+    def _get_embeddings_in_batches(
+        self,
+        texts: list[str],
+        batch_size: int,
+        progress_label: str | None = None,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+
+        embeddings: list[list[float]] = []
+        total = len(texts)
+        for start in range(0, total, max(1, batch_size)):
+            batch = texts[start : start + batch_size]
+            batch_vectors = self.embedding_provider.get_embeddings(batch)
+            if len(batch_vectors) != len(batch):
+                raise ValueError(
+                    f"Embedding count mismatch during rebuild. Expected {len(batch)} vectors, got {len(batch_vectors)}."
+                )
+            embeddings.extend(batch_vectors)
+            if progress_label:
+                self.logger.info("%s progress embedded=%s/%s", progress_label, len(embeddings), total)
+        return embeddings
+
+    def _insert_entities_in_batches(self, entities: list[dict], progress_label: str | None = None) -> int:
+        if not entities:
+            return 0
+
+        total = len(entities)
+        inserted = 0
+        for start in range(0, total, self.rebuild_insert_batch_size):
+            batch = entities[start : start + self.rebuild_insert_batch_size]
+            try:
+                self.client.insert(collection_name=self.collection_name, data=batch)
+            except Exception as exc:
+                first_entity = batch[0] if batch else {}
+                self.logger.exception(
+                    "Failed to insert batch into Milvus (batch_start=%s, batch_size=%s). "
+                    "First entity summary: memory_id=%s, task_name=%s, source_episode_id=%s, "
+                    "state_text_len=%s, action_text_len=%s, memory_text_len=%s, metadata_len=%s. "
+                    "Exception: %s",
+                    start,
+                    len(batch),
+                    first_entity.get("memory_id", "N/A"),
+                    first_entity.get("task_name", "N/A"),
+                    first_entity.get("source_episode_id", "N/A"),
+                    len(first_entity.get("state_text", "")),
+                    len(first_entity.get("action_text", "")),
+                    len(first_entity.get("memory_text", "")),
+                    len(first_entity.get("metadata", "")),
+                    exc,
+                )
+                raise
+            inserted += len(batch)
+            if progress_label:
+                self.logger.info("%s progress inserted=%s/%s", progress_label, inserted, total)
+        return inserted
+
+    @staticmethod
+    def _count_non_empty_lines(path: str) -> int:
+        count = 0
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    count += 1
+        return count
+
     def _entity_from_row(self, row: dict) -> dict:
         metadata = row.get("metadata", {})
         if not isinstance(metadata, str):
@@ -734,7 +850,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             "item_id": int(row.get("item_id", 0)),
             "source_episode_id": _safe_str(row.get("source_episode_id"), 128),
             "source_step": int(row.get("source_step", 0)),
-            "state_vector": row.get("state_vector", [0.0] * self.embedding_dim),
+            "state_vector": row.get("state_vector"),
             "state_text": _safe_str(row.get("state_text"), 4096),
             "action_text": _safe_str(row.get("action_text"), 4096),
             "memory_text": _safe_str(row.get("memory_text"), 8192),
@@ -747,7 +863,7 @@ class MilvusMemoryStore(BaseMemoryStore):
             "value": _safe_float(row.get("value")),
             "value_source": _safe_str(row.get("value_source"), 64),
             "value_update_step": _safe_str(row.get("value_update_step"), 64),
-            "created_at": int(row.get("created_at", int(time.time()))),
+            "created_at": _safe_str(row.get("created_at"), 64),
         }
 
     def _build_logger(self) -> logging.Logger:
@@ -810,6 +926,8 @@ class VectorMemoryStore(BaseMemoryStore):
         can_write: bool = True,
         bootstrap_path: str | None = None,
         bootstrap_collection_name: str | None = None,
+        rebuild_insert_batch_size: int = 100,
+        rebuild_embedding_batch_size: int = 64,
     ) -> None:
         normalized_backend = (backend or "").strip().lower()
         if not normalized_backend:
@@ -846,6 +964,8 @@ class VectorMemoryStore(BaseMemoryStore):
             can_write=can_write,
             bootstrap_path=bootstrap_path,
             bootstrap_collection_name=bootstrap_collection_name,
+            rebuild_insert_batch_size=rebuild_insert_batch_size,
+            rebuild_embedding_batch_size=rebuild_embedding_batch_size,
         )
 
     def initialize(self, mode: str) -> None:
