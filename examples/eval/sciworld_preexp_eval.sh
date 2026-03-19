@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -x
 
-export CUDA_VISIBLE_DEVICES="0,1"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export VLLM_USE_MODELSCOPE=0
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
-GPU_NUM=2
+GPU_NUM=4
 
 source activate
 conda activate agentgym-rl
@@ -16,11 +16,12 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 TASK_NAME="sciworld"
 ENV_SERVER_URL="http://0.0.0.0:12453"
 
-EXPERIMENT_NAME="Qwen2.5-0.5B-train_memory_records-gpt-5.1"
+EXPERIMENT_NAME="Qwen2.5-3B-Instruct-no_memory"
 EXPERIMENTS_ROOT="exp_results/MemAdaptor/pre_exp"
 DIR_DIR="/home/wurong/workspace/MemAdaptor/data/AgentGym"
+MODEL_PATH="/nvme/public_models/Qwen2.5-3B-Instruct"
 
-MODEL_PATH="/nvme/public_models/Qwen2.5-0.5B-Instruct"
+MEMORY_ENABLED=False
 
 SAMPLE_NUM=1
 MAX_ROUNDS=30
@@ -36,7 +37,7 @@ ROLLOUT_LOG_DIR="${EXP_DIR}/logs"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
 RESULTS_DIR="${EXP_DIR}/results"
 
-REBUILD_SOURCE_PATH="/home/wurong/workspace/MemAdaptor/data/AgentGym/AgentTraj-L/alfworld_train_memory_records-gpt-5.1.jsonl"
+REBUILD_SOURCE_PATH="/home/wurong/workspace/MemAdaptor/data/AgentGym/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 
 
 # 创建所需目录
@@ -68,7 +69,7 @@ HYDRA_FULL_ERROR=1 python3 -m verl.agent_trainer.main_generation \
     rollout.max_tokens=200 \
     rollout.tensor_model_parallel_size=1 \
     rollout.rollout_log_dir="${ROLLOUT_LOG_DIR}" \
-    rollout.memory.enabled=True \
+    rollout.memory.enabled=${MEMORY_ENABLED} \
     rollout.memory.backend=milvus \
     rollout.memory.mode=init_if_missing \
     rollout.memory.write_back=False \
