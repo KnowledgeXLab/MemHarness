@@ -14,18 +14,14 @@
 """
 Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 """
-from .base import BaseShardingManager
 
 from torch.distributed.device_mesh import DeviceMesh
 
-from verl.utils.torch_functional import allgather_dict_tensors
-from verl.utils.ulysses import set_ulysses_sequence_parallel_group, get_ulysses_sequence_parallel_group
-import numpy as np
-
-import torch
-import torch.distributed
-
 from verl import DataProto
+from verl.protocol import all_gather_data_proto
+from verl.utils.ulysses import get_ulysses_sequence_parallel_group, set_ulysses_sequence_parallel_group
+
+from .base import BaseShardingManager
 
 
 class FSDPUlyssesShardingManager(BaseShardingManager):
@@ -43,7 +39,7 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
             # We have a global SP group
             # so we have to change to use model-specific sp group
             self.prev_sp_group = get_ulysses_sequence_parallel_group()
-            set_ulysses_sequence_parallel_group(self.device_mesh['sp'].get_group())
+            set_ulysses_sequence_parallel_group(self.device_mesh["sp"].get_group())
             # TODO: check how to set seed for each model
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -60,19 +56,9 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
         In Ulysses, we need to make sure the same data is used across a SP group
         """
         if self.device_mesh is not None:
-            sp_size = self.device_mesh['sp'].size()
-            group = self.device_mesh['sp'].get_group()
+            group = self.device_mesh["sp"].get_group()
 
-            prev_device = data.batch.device
-            data.batch = data.batch.cuda(device=torch.cuda.current_device())
-            data.batch = allgather_dict_tensors(data.batch.contiguous(), size=sp_size, group=group, dim=0)
-            data.batch = data.batch.to(prev_device)
-            # all gather non_tensor_batch
-            all_non_tensor_batch = [None for _ in range(sp_size)]
-            torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group=group)
-            data.non_tensor_batch = {
-                k: np.concatenate([d[k] for d in all_non_tensor_batch]) for k in data.non_tensor_batch
-            }
+            all_gather_data_proto(data=data, process_group=group)
         return data
 
     def postprocess_data(self, data: DataProto) -> DataProto:
@@ -80,7 +66,7 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
         Split the data to follow FSDP partition
         """
         if self.device_mesh is not None:
-            sp_size = self.device_mesh['sp'].size()
-            sp_rank = self.device_mesh['sp'].get_local_rank()
+            sp_size = self.device_mesh["sp"].size()
+            sp_rank = self.device_mesh["sp"].get_local_rank()
             data = data.chunk(chunks=sp_size)[sp_rank]
         return data

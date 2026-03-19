@@ -1,0 +1,594 @@
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import re
+import time
+from typing import Iterable
+
+from .types import MemoryRecord, RetrievedMemory
+
+SUPPORTED_MEMORY_INIT_MODES = {
+    "init_if_missing",
+    "recreate",
+}
+
+
+def _safe_str(value: object, max_length: int) -> str:
+    text = "" if value is None else str(value)
+    if max_length > 0 and len(text) > max_length:
+        return text[:max_length]
+    return text
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number in (float("inf"), float("-inf")):
+        return default
+    return number
+
+
+def _normalize_collection_name(task_name: str, collection_name: str | None) -> str:
+    if collection_name:
+        return collection_name
+    normalized = re.sub(r"[^0-9a-zA-Z_]+", "_", task_name or "memory").strip("_")
+    return f"agent_memories_{normalized or 'memory'}"
+
+
+class RemoteEmbeddingProvider:
+    """OpenAI-compatible embedding client used by the local vector store."""
+
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str = "empty",
+        model_name: str = "bge_m3",
+        embedding_dim: int = 1024,
+        timeout: int = 30,
+    ) -> None:
+        if not api_url:
+            raise ValueError("`env.memory.embedding_api_url` must be set when memory is enabled.")
+        self.api_url = api_url
+        self.api_key = api_key
+        self.model_name = model_name
+        self.embedding_dim = embedding_dim
+        self.timeout = timeout
+        self.client = None
+
+    def _ensure_client(self):
+        if self.client is not None:
+            return self.client
+
+        import httpx
+        from openai import OpenAI
+
+        http_client = httpx.Client(verify=False, trust_env=False, timeout=float(self.timeout))
+        self.client = OpenAI(api_key=self.api_key, base_url=self.api_url, http_client=http_client)
+        return self.client
+
+    def get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        client = self._ensure_client()
+        embedding_obj = client.embeddings.create(input=texts, model=self.model_name)
+        embeddings = [list(item.embedding) for item in embedding_obj.data]
+        if len(embeddings) != len(texts):
+            raise ValueError(
+                f"Embedding service returned {len(embeddings)} vectors for {len(texts)} inputs."
+            )
+        return embeddings
+
+
+class MilvusMemoryStore:
+    """Local Milvus-Lite backed vector memory store for naive RAG retrieval."""
+
+    def __init__(
+        self,
+        task_name: str,
+        store_dir: str,
+        collection_name: str | None = None,
+        embedding_api_url: str | None = None,
+        embedding_api_key: str = "empty",
+        embedding_model: str = "bge_m3",
+        embedding_dim: int = 1024,
+        timeout: int = 30,
+        only_successful: bool = True,
+        top_k: int = 3,
+        min_score: float = 0.1,
+        retrieve_key: str = "memory_text",
+        rebuild_source_path: str | None = None,
+        rebuild_source_collection_name: str | None = None,
+        rebuild_insert_batch_size: int = 1000,
+        rebuild_embedding_batch_size: int = 256,
+    ) -> None:
+        self.task_name = task_name
+        self.store_dir = os.path.abspath(store_dir)
+        self.db_path = os.path.join(self.store_dir, "milvus_memory.db")
+        self.collection_name = _normalize_collection_name(task_name=task_name, collection_name=collection_name)
+        self.only_successful = only_successful
+        self.top_k = top_k
+        self.min_score = min_score
+        self.timeout = timeout
+        self.embedding_dim = embedding_dim
+        self.retrieve_key = retrieve_key
+        self.rebuild_source_path = rebuild_source_path
+        self.rebuild_source_collection_name = rebuild_source_collection_name
+        self.rebuild_insert_batch_size = max(1, int(rebuild_insert_batch_size))
+        self.rebuild_embedding_batch_size = max(1, int(rebuild_embedding_batch_size))
+        self.embedding_provider = RemoteEmbeddingProvider(
+            api_url=embedding_api_url or "",
+            api_key=embedding_api_key,
+            model_name=embedding_model,
+            embedding_dim=embedding_dim,
+            timeout=timeout,
+        )
+
+        self._client = None
+        self._milvus_client_cls = None
+        self._collection_schema_cls = None
+        self._field_schema_cls = None
+        self._data_type = None
+
+        os.makedirs(self.store_dir, exist_ok=True)
+        atexit.register(self.close)
+
+    def initialize(self, mode: str, clean_before_init: bool = False) -> None:
+        normalized_mode = str(mode).strip().lower()
+        if normalized_mode not in SUPPORTED_MEMORY_INIT_MODES:
+            raise ValueError(
+                f"Unsupported memory mode: {mode}. Expected one of {sorted(SUPPORTED_MEMORY_INIT_MODES)}."
+            )
+
+        client = self._ensure_client()
+
+        if clean_before_init and os.path.isdir(self.store_dir):
+            self.close()
+            db_stem = os.path.splitext(os.path.basename(self.db_path))[0]
+            for entry in os.listdir(self.store_dir):
+                if entry.startswith(db_stem):
+                    path = os.path.join(self.store_dir, entry)
+                    if os.path.isfile(path):
+                        os.remove(path)
+            client = self._ensure_client(force_new=True)
+
+        collections = set(client.list_collections())
+        if normalized_mode == "recreate" and self.collection_name in collections:
+            client.drop_collection(self.collection_name)
+            collections.remove(self.collection_name)
+
+        should_rebuild = bool(self.rebuild_source_path) and (
+            normalized_mode == "recreate" or self.collection_name not in collections
+        )
+        if should_rebuild:
+            self.rebuild_from_path(
+                source_path=self.rebuild_source_path,
+                source_collection_name=self.rebuild_source_collection_name,
+            )
+            return
+
+        if self.collection_name not in collections:
+            self._create_collection()
+
+    def add_records(self, records: Iterable[MemoryRecord]) -> None:
+        buffered = list(records)
+        if not buffered:
+            return
+
+        embeddings = self._embed_texts([getattr(record, self.retrieve_key, "") for record in buffered])
+        entities = []
+        now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        vector_field_name = self._vector_field_name
+        for idx, record in enumerate(buffered):
+            entities.append(
+                {
+                    "memory_id": _safe_str(record.memory_id, 128),
+                    "task_name": _safe_str(record.task_name, 128),
+                    "item_id": int(record.item_id),
+                    "source_episode_id": _safe_str(record.source_episode_id, 128),
+                    "source_step": int(record.source_step),
+                    vector_field_name: embeddings[idx],
+                    "state_text": _safe_str(record.state_text, 4096),
+                    "action_text": _safe_str(record.action_text, 4096),
+                    "memory_text": _safe_str(record.memory_text, 8192),
+                    "reward": _safe_float(record.reward),
+                    "success": bool(record.success),
+                    "created_step": _safe_str(record.created_step, 64),
+                    "retrieval_count": int(record.retrieval_count),
+                    "last_used_step": _safe_str(record.last_used_step, 64),
+                    "metadata": _safe_str(json.dumps(record.metadata, ensure_ascii=False), 8192),
+                    "value": _safe_float(record.value),
+                    "value_source": _safe_str(record.value_source, 64),
+                    "value_update_step": _safe_str(record.value_update_step, 64),
+                    "created_at": _safe_str(record.created_at or now_ts, 64),
+                }
+            )
+
+        self._insert_entities_in_batches(entities)
+
+    def retrieve(self, query_text: str) -> list[RetrievedMemory]:
+        if not query_text:
+            return []
+
+        client = self._ensure_client()
+        query_vector = self._embed_texts([query_text])[0]
+        search_kwargs = {
+            "collection_name": self.collection_name,
+            "data": [query_vector],
+            "limit": max(1, self.top_k),
+            "output_fields": [
+                "memory_id",
+                "state_text",
+                "action_text",
+                "memory_text",
+                "reward",
+                "metadata",
+                "value",
+                "value_source",
+            ],
+        }
+        if self.only_successful:
+            search_kwargs["filter"] = "success == true"
+
+        results = client.search(**search_kwargs)
+        hits = results[0] if results else []
+        retrieved: list[RetrievedMemory] = []
+        for hit in hits:
+            entity = hit.get("entity", {})
+            score = _safe_float(1 - hit["distance"])
+            if score < self.min_score:
+                continue
+            metadata = entity.get("metadata", {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {"raw_metadata": metadata}
+            retrieved.append(
+                RetrievedMemory(
+                    memory_id=entity.get("memory_id", ""),
+                    score=score,
+                    state_text=entity.get("state_text", ""),
+                    action_text=entity.get("action_text", ""),
+                    memory_text=entity.get("memory_text", ""),
+                    reward=_safe_float(entity.get("reward", 0.0)),
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                    value=entity.get("value"),
+                    value_source=entity.get("value_source"),
+                )
+            )
+        return retrieved
+
+    def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
+        source_path = os.path.abspath(source_path)
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Memory rebuild source does not exist: {source_path}")
+
+        if source_path.endswith(".jsonl"):
+            return self._rebuild_from_jsonl(source_path)
+        if source_path.endswith(".db"):
+            return self._rebuild_from_db(source_path, source_collection_name=source_collection_name)
+        raise ValueError(f"Unsupported rebuild source: {source_path}")
+
+    def export_jsonl(self, output_path: str, include_vectors: bool = True) -> int:
+        client = self._ensure_client()
+        records = self._iter_collection_records_from_client(
+            client=client,
+            collection_name=self.collection_name,
+            include_vectors=include_vectors,
+        )
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        exported = 0
+        with open(output_path, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                exported += 1
+        return exported
+
+    def update_records(self, updates: Iterable[dict]) -> int:
+        buffered_updates = [dict(update) for update in updates if update and update.get("memory_id")]
+        if not buffered_updates:
+            return 0
+
+        client = self._ensure_client()
+        vector_field_name = self._vector_field_name
+        updated_entities: list[dict] = []
+        updated_ids: list[str] = []
+        for update in buffered_updates:
+            memory_id = str(update["memory_id"])
+            existing_rows = client.query(
+                collection_name=self.collection_name,
+                filter=f'memory_id == "{memory_id}"',
+                output_fields=[
+                    "memory_id",
+                    "task_name",
+                    "item_id",
+                    "source_episode_id",
+                    "source_step",
+                    vector_field_name,
+                    "state_text",
+                    "action_text",
+                    "memory_text",
+                    "reward",
+                    "success",
+                    "created_step",
+                    "retrieval_count",
+                    "last_used_step",
+                    "metadata",
+                    "value",
+                    "value_source",
+                    "value_update_step",
+                    "created_at",
+                ],
+                limit=1,
+            )
+            if not existing_rows:
+                continue
+
+            row = dict(existing_rows[0])
+            retrieval_increment = int(update.get("_increment_retrieval_count", 0))
+            if "metadata" in update and isinstance(update["metadata"], dict):
+                current_metadata = row.get("metadata", {})
+                if isinstance(current_metadata, str):
+                    try:
+                        current_metadata = json.loads(current_metadata)
+                    except json.JSONDecodeError:
+                        current_metadata = {}
+                if not isinstance(current_metadata, dict):
+                    current_metadata = {}
+                merged_metadata = dict(current_metadata)
+                merged_metadata.update(update["metadata"])
+                update = dict(update)
+                update["metadata"] = merged_metadata
+
+            for field in [
+                "task_name",
+                "item_id",
+                "source_episode_id",
+                "source_step",
+                "state_text",
+                "action_text",
+                "memory_text",
+                "reward",
+                "success",
+                "created_step",
+                "retrieval_count",
+                "last_used_step",
+                "metadata",
+                "value",
+                "value_source",
+                "value_update_step",
+                "created_at",
+            ]:
+                if field in update:
+                    row[field] = update[field]
+
+            if retrieval_increment:
+                row["retrieval_count"] = int(row["retrieval_count"]) + retrieval_increment
+
+            if self.retrieve_key in update and vector_field_name not in update:
+                row[vector_field_name] = self._embed_texts([str(row[self.retrieve_key])])[0]
+            elif vector_field_name in update:
+                row[vector_field_name] = update[vector_field_name]
+
+            updated_entities.append(self._entity_from_row(row))
+            updated_ids.append(memory_id)
+
+        if not updated_entities:
+            return 0
+
+        expr = ", ".join(f'"{memory_id}"' for memory_id in updated_ids)
+        client.delete(collection_name=self.collection_name, filter=f"memory_id in [{expr}]")
+        self._insert_entities_in_batches(updated_entities)
+        return len(updated_entities)
+
+    def close(self) -> None:
+        if self._client is None:
+            return
+        close_fn = getattr(self._client, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+        self._client = None
+
+    @property
+    def _vector_field_name(self) -> str:
+        base_name = self.retrieve_key.replace("_text", "")
+        return f"{base_name}_vector"
+
+    def _ensure_client(self, force_new: bool = False):
+        if self._client is not None and not force_new:
+            return self._client
+
+        from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+
+        self._milvus_client_cls = MilvusClient
+        self._collection_schema_cls = CollectionSchema
+        self._field_schema_cls = FieldSchema
+        self._data_type = DataType
+        self._client = MilvusClient(self.db_path)
+        return self._client
+
+    def _create_collection(self) -> None:
+        client = self._ensure_client()
+        vector_field_name = self._vector_field_name
+        FieldSchema = self._field_schema_cls
+        DataType = self._data_type
+        CollectionSchema = self._collection_schema_cls
+
+        fields = [
+            FieldSchema(name="memory_id", dtype=DataType.VARCHAR, is_primary=True, max_length=128),
+            FieldSchema(name="task_name", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="item_id", dtype=DataType.INT64),
+            FieldSchema(name="source_episode_id", dtype=DataType.VARCHAR, max_length=128),
+            FieldSchema(name="source_step", dtype=DataType.INT64),
+            FieldSchema(name=vector_field_name, dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
+            FieldSchema(name="state_text", dtype=DataType.VARCHAR, max_length=4096),
+            FieldSchema(name="action_text", dtype=DataType.VARCHAR, max_length=4096),
+            FieldSchema(name="memory_text", dtype=DataType.VARCHAR, max_length=8192),
+            FieldSchema(name="reward", dtype=DataType.FLOAT),
+            FieldSchema(name="success", dtype=DataType.BOOL),
+            FieldSchema(name="created_step", dtype=DataType.VARCHAR, max_length=64),
+            FieldSchema(name="retrieval_count", dtype=DataType.INT64),
+            FieldSchema(name="last_used_step", dtype=DataType.VARCHAR, max_length=64),
+            FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=8192),
+            FieldSchema(name="value", dtype=DataType.FLOAT),
+            FieldSchema(name="value_source", dtype=DataType.VARCHAR, max_length=64),
+            FieldSchema(name="value_update_step", dtype=DataType.VARCHAR, max_length=64),
+            FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=64),
+        ]
+        schema = CollectionSchema(fields=fields, description="External memory records for naive RAG retrieval")
+        client.create_collection(
+            collection_name=self.collection_name,
+            schema=schema,
+            dimension=self.embedding_dim,
+            auto_id=False,
+        )
+        index_params = self._milvus_client_cls.prepare_index_params()
+        index_params.add_index(field_name=vector_field_name, index_type="FLAT", metric_type="COSINE")
+        client.create_index(collection_name=self.collection_name, index_params=index_params)
+
+    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        cleaned = [text if text else " " for text in texts]
+        return self.embedding_provider.get_embeddings(cleaned)
+
+    def _insert_entities_in_batches(self, entities: list[dict]) -> int:
+        if not entities:
+            return 0
+        client = self._ensure_client()
+        inserted = 0
+        for start in range(0, len(entities), self.rebuild_insert_batch_size):
+            chunk = entities[start : start + self.rebuild_insert_batch_size]
+            client.insert(collection_name=self.collection_name, data=chunk)
+            inserted += len(chunk)
+        return inserted
+
+    def _iter_collection_records_from_client(
+        self,
+        client,
+        collection_name: str,
+        include_vectors: bool = True,
+        vector_field_name: str | None = None,
+    ) -> list[dict]:
+        vector_field_name = vector_field_name or self._vector_field_name
+        output_fields = [
+            "memory_id",
+            "task_name",
+            "item_id",
+            "source_episode_id",
+            "source_step",
+            "state_text",
+            "action_text",
+            "memory_text",
+            "reward",
+            "success",
+            "created_step",
+            "retrieval_count",
+            "last_used_step",
+            "metadata",
+            "value",
+            "value_source",
+            "value_update_step",
+            "created_at",
+        ]
+        if include_vectors:
+            output_fields.append(vector_field_name)
+
+        records: list[dict] = []
+        offset = 0
+        limit = 1000
+        while True:
+            batch = client.query(
+                collection_name=collection_name,
+                filter="",
+                output_fields=output_fields,
+                limit=limit,
+                offset=offset,
+            )
+            if not batch:
+                break
+            records.extend(batch)
+            offset += len(batch)
+            if len(batch) < limit:
+                break
+        return records
+
+    def _rebuild_from_db(self, source_db_path: str, source_collection_name: str | None = None) -> int:
+        client = self._ensure_client()
+        source_client = self._milvus_client_cls(db_path=source_db_path)
+        source_collection = source_collection_name or self.collection_name
+        collections = set(source_client.list_collections())
+        if source_collection not in collections:
+            raise ValueError(f"Collection {source_collection} not found in source db {source_db_path}")
+
+        if self.collection_name in set(client.list_collections()):
+            client.drop_collection(self.collection_name)
+        self._create_collection()
+
+        rows = self._iter_collection_records_from_client(
+            client=source_client,
+            collection_name=source_collection,
+            include_vectors=True,
+        )
+        inserted = self._insert_entities_in_batches(rows)
+        close_fn = getattr(source_client, "close", None)
+        if callable(close_fn):
+            close_fn()
+        return inserted
+
+    def _rebuild_from_jsonl(self, source_jsonl_path: str) -> int:
+        client = self._ensure_client()
+        if self.collection_name in set(client.list_collections()):
+            client.drop_collection(self.collection_name)
+        self._create_collection()
+
+        records: list[MemoryRecord] = []
+        with open(source_jsonl_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if "memory_id" not in payload:
+                    continue
+                records.append(MemoryRecord.from_dict(payload))
+
+        inserted = 0
+        for start in range(0, len(records), self.rebuild_embedding_batch_size):
+            chunk = records[start : start + self.rebuild_embedding_batch_size]
+            self.add_records(chunk)
+            inserted += len(chunk)
+        return inserted
+
+    def _entity_from_row(self, row: dict) -> dict:
+        vector_field_name = self._vector_field_name
+        metadata = row.get("metadata", {})
+        if isinstance(metadata, dict):
+            metadata = json.dumps(metadata, ensure_ascii=False)
+        return {
+            "memory_id": _safe_str(row.get("memory_id"), 128),
+            "task_name": _safe_str(row.get("task_name"), 128),
+            "item_id": int(row.get("item_id", 0)),
+            "source_episode_id": _safe_str(row.get("source_episode_id"), 128),
+            "source_step": int(row.get("source_step", 0)),
+            vector_field_name: row.get(vector_field_name, [0.0] * self.embedding_dim),
+            "state_text": _safe_str(row.get("state_text"), 4096),
+            "action_text": _safe_str(row.get("action_text"), 4096),
+            "memory_text": _safe_str(row.get("memory_text"), 8192),
+            "reward": _safe_float(row.get("reward")),
+            "success": bool(row.get("success")),
+            "created_step": _safe_str(row.get("created_step"), 64),
+            "retrieval_count": int(row.get("retrieval_count", 0)),
+            "last_used_step": _safe_str(row.get("last_used_step"), 64),
+            "metadata": _safe_str(metadata, 8192),
+            "value": _safe_float(row.get("value")),
+            "value_source": _safe_str(row.get("value_source"), 64),
+            "value_update_step": _safe_str(row.get("value_update_step"), 64),
+            "created_at": _safe_str(row.get("created_at"), 64),
+        }

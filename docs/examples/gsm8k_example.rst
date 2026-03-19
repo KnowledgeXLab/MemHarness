@@ -51,17 +51,20 @@ Step 2: Download Model
 
 There're three ways to prepare the model checkpoints for post-training:
 
-- Download the required models from hugging face
+- Download the required models from huggingface or modelscope
 
 .. code:: bash
 
    huggingface-cli download deepseek-ai/deepseek-math-7b-instruct --local-dir ~/models/deepseek-math-7b-instruct --local-dir-use-symlinks False
+   # or
+   modelscope download --model deepseek-ai/deepseek-math-7b-instruct --local_dir ~/models/deepseek-math-7b-instruct
 
 - Already store your store model in the local directory or HDFS path.
 - Also, you can directly use the model name in huggingface (e.g.,
   deepseek-ai/deepseek-math-7b-instruct) in
   ``actor_rollout_ref.model.path`` and ``critic.model.path`` field in
-  the run script.
+  the run script. You can also download models from modelscope by setting environmental variable ``VERL_USE_MODELSCOPE=True``.
+  See examples/ppo_trainer/run_deepseek7b_llm_modelscope.sh for example.
 
 Noted that users should prepare checkpoints for actor, critic and reward
 model.
@@ -92,6 +95,16 @@ We also provide various training scripts for SFT on GSM8K dataset in `gsm8k sft 
        trainer.experiment_name=gsm8k-sft-deepseek-coder-6.7b-instruct \
        trainer.total_epochs=4 \
        trainer.logger=['console','wandb']
+
+
+If you use AMD GPUs (ROCm kernel), you need to add the following environment variables into the run script:
+
+    .. code-block:: bash
+
+        export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export ROCR_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
+        export CUDA_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
+
 
 Step 4: Perform PPO training with your model on GSM8K Dataset
 -------------------------------------------------------------
@@ -130,7 +143,6 @@ The script of run_deepseek7b_llm.sh
       data.train_files=$HOME/data/gsm8k/train.parquet \
       data.val_files=$HOME/data/gsm8k/test.parquet \
       data.train_batch_size=1024 \
-      data.val_batch_size=1312 \
       data.max_prompt_length=512 \
       data.max_response_length=512 \
       actor_rollout_ref.model.path=deepseek-ai/deepseek-llm-7b-chat \
@@ -139,7 +151,6 @@ The script of run_deepseek7b_llm.sh
       actor_rollout_ref.actor.ppo_mini_batch_size=256 \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
       actor_rollout_ref.actor.fsdp_config.param_offload=False \
-      actor_rollout_ref.actor.fsdp_config.grad_offload=False \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
       actor_rollout_ref.model.enable_gradient_checkpointing=True \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
@@ -154,7 +165,6 @@ The script of run_deepseek7b_llm.sh
       critic.model.enable_gradient_checkpointing=True \
       critic.ppo_micro_batch_size_per_gpu=32 \
       critic.model.fsdp_config.param_offload=False \
-      critic.model.fsdp_config.grad_offload=False \
       critic.model.fsdp_config.optimizer_offload=False \
       algorithm.kl_ctrl.kl_coef=0.001 \
       trainer.critic_warmup=0 \
@@ -166,3 +176,14 @@ The script of run_deepseek7b_llm.sh
       trainer.save_freq=-1 \
       trainer.test_freq=1 \
       trainer.total_epochs=15 $@
+
+
+If you use AMD GPUs (ROCm kernel), you need to add the following environment variables into the run script:
+
+    .. code-block:: bash
+
+        export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export ROCR_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
+        export CUDA_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES
+
+If you encounter any issues in using AMD GPUs running VeRL, feel free to contact me - `Yusheng Su <https://yushengsu-thu.github.io/>`_.

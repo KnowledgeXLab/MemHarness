@@ -16,53 +16,51 @@ name = "verl"
 # We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
 # (PEP 621 calls this "dynamic version"). 
 # The actual version is specified in the [tool.setuptools.dynamic] section below.
-dynamic = ["version"]
+dynamic = ["version", "dependencies", "optional-dependencies", "authors", "urls"]
 
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
 license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
 
-authors = [
-  { name = "Bytedance - Seed - MLSys", email = "zhangchi.usc1992@bytedance.com" },
-  { name = "Bytedance - Seed - MLSys", email = "gmsheng@connect.hku.hk" },
-]
+# -------------------------------
+# tool.ruff - Linting configuration
+# -------------------------------
+[tool.ruff]
+# Note: While the formatter will attempt to format lines such that they remain within the line-length,
+# it isn't a hard upper bound, and formatted lines may exceed the line-length.
+line-length = 300 # TODO: Reduce this to a more reasonable value
 
-# Dependencies corresponding to install_requires in setup.py
-dependencies = [
-    "accelerate",
-    "codetiming",
-    "datasets",
-    "dill",
-    "hydra-core",
-    "httpx",
-    "numpy",
-    "openai",
-    "pandas",
-    "peft",
-    "pymilvus",
-    "pyarrow>=15.0.0",
-    "pybind11",
-    "pylatexenc",
-    "ray>=2.10",
-    "tensordict<0.6",
-    "transformers",
-    "vllm<=0.6.3",
-    'wandb',
-    'torch==2.4.0',
+[tool.ruff.lint]
+isort = {known-first-party = ["verl"]}
+# c.f. https://github.com/vllm-project/vllm/blob/ce8d6b75fc0586045df75ee1568a5b5f9957251b/pyproject.toml
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    "I",
+    "G",
 ]
-
-# Optional dependencies (extras_require in setup.py)
-[project.optional-dependencies]
-test = [
-  "pytest", "yapf", "py-spy",
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
+    # `.log()` statement uses f-string
+    "G004",
 ]
-prime = ["pyext"]
-gpu = ["liger-kernel", "flash-attn"]
-
-# URLs
-[project.urls]
-Homepage = "https://github.com/volcengine/verl"
 
 # -------------------------------
 # tool.setuptools - Additional config
