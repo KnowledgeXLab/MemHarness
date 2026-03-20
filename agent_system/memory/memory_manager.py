@@ -158,7 +158,7 @@ class MemoryManager:
         header = self.config.prompt_header
         lines = [header]
         for index, memory in enumerate(retrieved, start=1):
-            lines.append(f"{index}. memory={memory.memory_text}")
+            lines.append(f"memory {index}: {memory.memory_text}")
             if append_score:
                 lines.append(f"   score: {memory.score:.3f}")
             if append_action:

@@ -136,6 +136,8 @@ def filter_group_data(batch_list : List[Dict],
                         success: Dict[str, np.ndarray],
                         traj_uid: np.ndarray,
                         tool_callings: np.ndarray,
+                        memory_retrieval_counts: np.ndarray,
+                        episode_gamefiles: np.ndarray,
                         config,
                         last_try: bool = False,
                         ):
@@ -145,7 +147,7 @@ def filter_group_data(batch_list : List[Dict],
     Adopted from DAPO (https://arxiv.org/abs/2503.14476)
     """
     if last_try:
-        return batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+        return batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
     
     batch_size = config.data.train_batch_size
     group_n = config.env.rollout.n
@@ -180,6 +182,8 @@ def filter_group_data(batch_list : List[Dict],
     # success = {key: value[keep_indices] for key, value in success.items()}
     traj_uid = traj_uid[keep_indices]
     tool_callings = tool_callings[keep_indices]
+    memory_retrieval_counts = memory_retrieval_counts[keep_indices]
+    episode_gamefiles = episode_gamefiles[keep_indices]
 
-    return batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+    return batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
 

@@ -1,11 +1,18 @@
+#!/usr/bin/env bash
+# 需用 bash 运行（含进程替换 `>(tee ...)`）；推荐: bash eval_alfworld-preexp.sh
 set -x
 set -euo pipefail
 ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export CUDA_VISIBLE_DEVICES=0,1
 export HYDRA_FULL_ERROR=1
+export WANDB_MODE=offline
 
 GPU_NUM=2
+# Ray Object Store（Plasma）内存上限，单位 GiB；传给 ray_init.object_store_memory（字节）
+RAY_OBJECT_STORE_GIB=128
+RAY_OBJECT_STORE_BYTES=$((RAY_OBJECT_STORE_GIB * 1024 * 1024 * 1024))
+
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
 VAL_FILE="${DATA_ROOT}/text/test.parquet"
@@ -29,33 +36,47 @@ if [ "${MEMORY_ENABLED}" == "True" ]; then
     EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
     EXPERIMENT_NAME="${EXPERIMENT_NAME}-retrieve_${RETRIEVE_KEY}"
 else
-    EXPERIMENT_NAME="${EXPERIMENT_NAME}"
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}-no_memory"
 fi
 
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
-RESULTS_DIR="${EXP_DIR}/results"
+
+mkdir -p "${EXP_DIR}"
+LOG_FILE="${EXP_DIR}/eval_alfworld-$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee "${LOG_FILE}") 2>&1
+echo "[log] Writing full run output to: ${LOG_FILE}"
 
 train_data_size=16
-val_data_size=128
+# 验证并行环境数（每批）；需整除 infer 得到的 val 样本数（常见 140→28 或 20）
+val_batch_size=20
 group_size=8
 
-# We only use data preparation to indicate the modality and the data size.
+# 默认：从 AlfredTWEnv 推断 train/eval 全量可玩 game 数并生成占位 parquet（与轨迹条数一致）
+# 首次或需改条数：PREPARE_OVERWRITE=1 bash examples/grpo_trainer/eval_alfworld-preexp.sh
+PREPARE_FLAGS=()
+if [ "${PREPARE_OVERWRITE:-0}" = "1" ] || [ "${PREPARE_OVERWRITE:-}" = "true" ]; then
+  PREPARE_FLAGS+=(--overwrite)
+fi
+
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
     --local_dir "${DATA_ROOT}" \
-    --train_data_size $train_data_size \
-    --val_data_size $val_data_size
+    --infer_alfworld_sizes \
+    --alfworld_eval_split eval_in_distribution \
+    "${PREPARE_FLAGS[@]}"
 
 python3 -m verl.trainer.main_ppo \
+    ray_init.object_store_memory=${RAY_OBJECT_STORE_BYTES} \
     algorithm.adv_estimator=grpo \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${VAL_FILE} \
     data.train_batch_size=$train_data_size \
-    data.val_batch_size=$val_data_size \
+    data.val_batch_size=$val_batch_size \
     data.max_prompt_length=2048 \
     data.max_response_length=512 \
+    data.train_drop_last=false \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
@@ -104,7 +125,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
-    trainer.rollout_data_dir=${EXP_DIR}/rollout \
-    trainer.validation_data_dir=${EXP_DIR}/val_data \
+    trainer.validation_data_dir=${EXP_DIR}/val_traj \
     trainer.val_before_train=True \
     trainer.val_only=True $@

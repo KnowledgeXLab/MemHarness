@@ -238,6 +238,8 @@ class TrajectoryCollector:
             success: Dict[str, np.ndarray],
             traj_uid: np.ndarray,
             tool_callings: np.ndarray,
+            memory_retrieval_counts: np.ndarray,
+            episode_gamefiles: np.ndarray,
             ) -> DataProto:
         """
         Collect and organize trajectory data, handling batch size adjustments to meet parallel training requirements.
@@ -249,6 +251,8 @@ class TrajectoryCollector:
             success (Dict[str, np.ndarray]): Success samples for each environment
             traj_uid (np.ndarray): Trajectory unique identifiers
             tool_callings (np.ndarray): Number of tool callings for each environment
+            memory_retrieval_counts (np.ndarray): Per-trajectory count of memory retrievals (non-empty injection or memory_query step)
+            episode_gamefiles (np.ndarray): AlfWorld ``extra.gamefile`` per trajectory when available
         Returns:
             DataProto: Collected and organized trajectory data
         """
@@ -270,6 +274,9 @@ class TrajectoryCollector:
                     data['episode_lengths'] = episode_lengths[bs]
                     # tool_callings
                     data['tool_callings'] = tool_callings[bs]
+                    # memory_retrieval_counts (per trajectory; same value on every step row)
+                    data['memory_retrieval_counts'] = memory_retrieval_counts[bs]
+                    data['episode_gamefile'] = episode_gamefiles[bs]
                     # success_rate
                     for key, value in success_rate.items():
                         data[key] = value
@@ -308,6 +315,13 @@ class TrajectoryCollector:
         # Initial observations from the environment
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
 
+        episode_gamefiles = np.empty(batch_size, dtype=object)
+        for i in range(batch_size):
+            if i < len(infos) and infos[i] is not None:
+                episode_gamefiles[i] = infos[i].get("extra.gamefile")
+            else:
+                episode_gamefiles[i] = None
+
         lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
         assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
         
@@ -328,6 +342,7 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
+        memory_retrieval_counts = np.zeros(batch_size, dtype=np.float32)
         count_query_as_step = bool(self.config.env.memory.count_query_as_step)
         max_env_steps = max(1, int(self.config.env.max_steps))
         max_rollout_rounds = max_env_steps * 4
@@ -383,6 +398,12 @@ class TrajectoryCollector:
                 current_infos=infos,
             )
 
+            for i in range(batch_size):
+                if episode_gamefiles[i] is None and i < len(infos) and infos[i] is not None:
+                    gf = infos[i].get("extra.gamefile")
+                    if gf is not None:
+                        episode_gamefiles[i] = gf
+
             
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -417,6 +438,16 @@ class TrajectoryCollector:
 
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
+            # Count memory retrievals per trajectory: explicit memory_query turns, or fixed-mode injection with non-empty text
+            for i in range(batch_size):
+                if not active_masks[i]:
+                    continue
+                if infos[i].get('memory_action_type') == 'memory_query':
+                    memory_retrieval_counts[i] += 1
+                else:
+                    inj = infos[i].get('memory_injected_text')
+                    if isinstance(inj, str) and inj.strip():
+                        memory_retrieval_counts[i] += 1
             # Create reward tensor, only assign rewards for active environments
             # episode_rewards += torch_to_numpy(rewards) * torch_to_numpy(active_masks)
             effective_env_step_mask = np.logical_and(active_masks, env_step_mask)
@@ -467,7 +498,7 @@ class TrajectoryCollector:
             traj_uid=traj_uid,
         )
         
-        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
     
     def dynamic_multi_turn_loop(
             self,
@@ -498,6 +529,8 @@ class TrajectoryCollector:
         total_success = []
         total_traj_uid = []
         total_tool_callings = []
+        total_memory_retrieval_counts = []
+        total_episode_gamefiles = []
         try_count: int = 0
         max_try_count = self.config.algorithm.filter_groups.max_num_gen_batches
 
@@ -507,17 +540,19 @@ class TrajectoryCollector:
                 print(f"valid num={len(total_batch_list)} < target num={self.config.data.train_batch_size * self.config.env.rollout.n}. Keep generating... ({try_count}/{max_try_count})")
             try_count += 1
 
-            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = self.vanilla_multi_turn_loop(
+            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles = self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
             )
-            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = filter_group_data(batch_list=batch_list, 
+            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles = filter_group_data(batch_list=batch_list, 
                                                                                                 episode_rewards=episode_rewards, 
                                                                                                 episode_lengths=episode_lengths, 
                                                                                                 success=success, 
                                                                                                 traj_uid=traj_uid, 
                                                                                                 tool_callings=tool_callings, 
+                                                                                                memory_retrieval_counts=memory_retrieval_counts, 
+                                                                                                episode_gamefiles=episode_gamefiles, 
                                                                                                 config=self.config,
                                                                                                 last_try=(try_count == max_try_count),
                                                                                                 )
@@ -528,14 +563,18 @@ class TrajectoryCollector:
             total_success.append(success)
             total_traj_uid.append(traj_uid)
             total_tool_callings.append(tool_callings)
+            total_memory_retrieval_counts.append(memory_retrieval_counts)
+            total_episode_gamefiles.append(episode_gamefiles)
 
         total_episode_rewards = np.concatenate(total_episode_rewards, axis=0)
         total_episode_lengths = np.concatenate(total_episode_lengths, axis=0)
         total_success = {key: np.concatenate([success[key] for success in total_success], axis=0) for key in total_success[0].keys()}
         total_traj_uid = np.concatenate(total_traj_uid, axis=0)
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
+        total_memory_retrieval_counts = np.concatenate(total_memory_retrieval_counts, axis=0)
+        total_episode_gamefiles = np.concatenate(total_episode_gamefiles, axis=0)
 
-        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
+        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, total_memory_retrieval_counts, total_episode_gamefiles
 
     def multi_turn_loop(
             self,
@@ -562,7 +601,7 @@ class TrajectoryCollector:
         # Initial observations from the environment
         if self.config.algorithm.filter_groups.enable and is_train:
             # Dynamic Sampling (for DAPO and Dynamic GiGPO)
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings, total_memory_retrieval_counts, total_episode_gamefiles = \
                 self.dynamic_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
@@ -570,7 +609,7 @@ class TrajectoryCollector:
             )
         else:
             # Vanilla Sampling   
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings, total_memory_retrieval_counts, total_episode_gamefiles = \
                 self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
@@ -580,6 +619,8 @@ class TrajectoryCollector:
         assert len(total_batch_list) == len(total_episode_lengths)
         assert len(total_batch_list) == len(total_traj_uid)
         assert len(total_batch_list) == len(totoal_tool_callings)
+        assert len(total_batch_list) == len(total_memory_retrieval_counts)
+        assert len(total_batch_list) == len(total_episode_gamefiles)
         
 
         # Create trajectory data
@@ -590,6 +631,8 @@ class TrajectoryCollector:
             success=total_success,
             traj_uid=total_traj_uid,
             tool_callings=totoal_tool_callings,
+            memory_retrieval_counts=total_memory_retrieval_counts,
+            episode_gamefiles=total_episode_gamefiles,
         )
         
         return gen_batch_output

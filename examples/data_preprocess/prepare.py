@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import importlib.util
 import os
 
 import datasets
@@ -26,8 +27,43 @@ if __name__ == '__main__':
     parser.add_argument('--train_data_size', default=256, type=int)
     parser.add_argument('--val_data_size', default=256, type=int)
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument(
+        '--infer_alfworld_sizes',
+        action='store_true',
+        help='Set train/val placeholder counts from AlfredTWEnv (full train & eval splits after filtering). '
+        'Requires ALFWORLD_DATA / json layout; may take ~1min.',
+    )
+    parser.add_argument(
+        '--alfworld_config',
+        default=None,
+        help='Path to config_tw.yaml (default: agent_system/.../config_tw.yaml).',
+    )
+    parser.add_argument(
+        '--alfworld_eval_split',
+        default='eval_in_distribution',
+        choices=['eval_in_distribution', 'eval_out_of_distribution'],
+        help='Which eval split to count for val_data_size when using --infer_alfworld_sizes.',
+    )
 
     args = parser.parse_args()
+
+    if args.infer_alfworld_sizes:
+        if args.mode != 'text':
+            raise ValueError('--infer_alfworld_sizes only supports --mode text')
+        _alf_mod_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'alfworld_sizes.py')
+        _spec = importlib.util.spec_from_file_location('alfworld_sizes', _alf_mod_path)
+        _alf_mod = importlib.util.module_from_spec(_spec)
+        assert _spec.loader is not None
+        _spec.loader.exec_module(_alf_mod)
+
+        n_train, n_val = _alf_mod.infer_alfworld_num_games(args.alfworld_config, args.alfworld_eval_split)
+        args.train_data_size = n_train
+        args.val_data_size = n_val
+        print(
+            f"[prepare] infer_alfworld_sizes: train_games={args.train_data_size}, "
+            f"eval_games({args.alfworld_eval_split})={args.val_data_size}"
+        )
+
     print(f"processing data for mode: {args.mode}")
     args.local_dir = os.path.join(os.path.expanduser(args.local_dir), args.mode)
     os.makedirs(args.local_dir, exist_ok=True)
@@ -37,6 +73,11 @@ if __name__ == '__main__':
 
     if not args.overwrite and os.path.exists(train_output_path) and os.path.exists(test_output_path):
         print(f"found existing parquet files under {args.local_dir}, reusing them")
+        print(
+            f"[prepare] train_samples={args.train_data_size}, val_samples={args.val_data_size}, "
+            f"total_samples={args.train_data_size + args.val_data_size} "
+            f"(requested sizes; parquet reused, use --overwrite to regenerate)"
+        )
         if args.hdfs_dir is not None:
             makedirs(args.hdfs_dir)
             copy(src=args.local_dir, dst=args.hdfs_dir)
@@ -104,6 +145,11 @@ if __name__ == '__main__':
 
     train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True, num_proc=8)
     test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True, num_proc=8)
+
+    print(
+        f"[prepare] train_samples={len(train_dataset)}, val_samples={len(test_dataset)}, "
+        f"total_samples={len(train_dataset) + len(test_dataset)}"
+    )
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir

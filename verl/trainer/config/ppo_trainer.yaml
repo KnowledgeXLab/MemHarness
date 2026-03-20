@@ -8,6 +8,8 @@ data:
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
+  # When train dataset size is not divisible by train batch size, set false to keep the last partial batch (full AlfWorld train set).
+  train_drop_last: true
   val_batch_size: null
   return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
   return_raw_chat: False
@@ -265,7 +267,8 @@ trainer:
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
-  validation_data_dir: null # directory for logging the validation data, no dump if null
+  # Validation JSONL: one object per trajectory; nested ``turns`` for each env step (see RayPPOTrainer._dump_validation_trajectories_jsonl).
+  validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
@@ -287,7 +290,8 @@ trainer:
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
-
+  # Ray Object Store (Plasma) cap in bytes. 68719476736 = 128 GiB. Lowers default huge RAM use on large machines.
+  object_store_memory: 137438953472
 
 env:
   env_name: alfworld/AlfredTWEnv
@@ -306,11 +310,11 @@ env:
     write_back: False   # Whether to write rollout trajectories back into memory online.
     only_store_positive_reward: True   # When write_back is enabled, only keep positive-reward samples.
     max_pairs_per_episode: 8   # When write_back is enabled, max number of memory pairs extracted from one episode.
-    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
+    count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
     server_advertised_host: null   # Host advertised to workers; auto-detected when null.
-    server_port: 8084   # Port for the local memory service. Use 0 for a random free port.
+    server_port: 0   # Port for the local memory service. Use 0 for a random free port.
     server_startup_timeout: 60   # Max seconds to wait for the memory service to become ready.
     rebuild_source_path: null   # Optional path to rebuild memory from an existing .jsonl/.db source.
     rebuild_source_collection_name: null   # Source collection name when rebuilding from a db file.
@@ -332,7 +336,7 @@ env:
     max_state_chars: 1200   # Max stored state text length.
     max_action_chars: 400   # Max stored action text length.
     max_memory_chars: 1200   # Max stored memory text length.
-    prompt_header: "Relevant past experiences are provided below. Reuse them only if they are consistent with the current state."   # Header inserted before retrieved memories.
+    prompt_header: "Relevant past experiences are provided below. Reuse them only if you think which ones are useful."   # Header inserted before retrieved memories.
   resources_per_worker: # resources for each env worker
     num_cpus: 0.1
     num_gpus: 0
