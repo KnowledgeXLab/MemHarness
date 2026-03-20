@@ -338,7 +338,7 @@ class MilvusMemoryStore:
             self.top_k,
             len(retrieved),
             self.min_score,
-            _safe_str(query_text, 20) + "..." if len(query_text) > 20 else query_text,
+            _safe_str(query_text, 50) + "..." if len(query_text) > 50 else query_text,
         )
         return retrieved
 

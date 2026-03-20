@@ -154,13 +154,17 @@ class MemoryManager:
         if self.store is not None:
             self.store.close()
 
-    def _format_memory_prompt(self, retrieved: list[RetrievedMemory]) -> str:
+    def _format_memory_prompt(self, retrieved: list[RetrievedMemory], append_score=False, append_action=False, append_value=False, append_state=False) -> str:
         header = self.config.prompt_header
         lines = [header]
         for index, memory in enumerate(retrieved, start=1):
-            lines.append(f"{index}. score={memory.score:.3f}")
-            lines.append(f"   similar_state: {memory.state_text}")
-            lines.append(f"   useful_action: {memory.action_text}")
-            if memory.value is not None:
+            lines.append(f"{index}. memory={memory.memory_text}")
+            if append_score:
+                lines.append(f"   score: {memory.score:.3f}")
+            if append_action:
+                lines.append(f"   useful_action: {memory.action_text}")
+            if append_value:
                 lines.append(f"   memory_value: {memory.value:.3f}")
+            if append_state:
+                lines.append(f"   similar_state: {memory.state_text}")
         return "\n".join(lines)
