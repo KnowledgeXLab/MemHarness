@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 
@@ -7,6 +8,8 @@ from omegaconf import DictConfig
 
 from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
+
+logger = logging.getLogger(__name__)
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -65,6 +68,16 @@ class MemoryManager:
             mode=memory_config.mode,
             clean_before_init=memory_config.clean_before_init,
         )
+
+        retrieval_mode = str(memory_config.retrieval_mode).strip().lower()
+        retrieve_key = str(memory_config.retrieve_key).strip().lower()
+        if retrieval_mode == "fixed" and retrieve_key in ("memory_text", "memory"):
+            logger.warning(
+                "Memory VDB: retrieval_mode=fixed uses current observation text as the query embedding, "
+                "but retrieve_key=%r means vectors are built from that field (not state_text). "
+                "If you want to use the same field for both query and index, set retrieve_key to state_text and rebuild the VDB.",
+                retrieve_key,
+            )
 
     def refresh(self) -> None:
         return

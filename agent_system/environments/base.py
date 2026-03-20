@@ -132,6 +132,9 @@ class EnvironmentManagerBase:
             return prompt
 
         if self.retrieval_memory.is_fixed_mode():
+            # Fixed mode: retrieval query embedding is built from `state_text` (current observation).
+            # The vector DB indexes whichever field `env.memory.retrieve_key` names (optionally `memory_text` or `state_text`).
+            # That pairing is asymmetric by design unless you set retrieve_key=state_text and rebuild.
             memory_prompt = self.retrieval_memory.build_memory_message(state_text=state_text)
             return self._append_external_memory(prompt, memory_prompt)
 

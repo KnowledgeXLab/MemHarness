@@ -319,7 +319,7 @@ env:
     embedding_model: bge_m3   # Embedding model name.
     embedding_dim: 1024   # Embedding vector dimension.
     vdb_timeout: 30   # Request timeout in seconds for the memory backend.
-    retrieve_key: memory_text   # Which text field to use as retrieval target from stored memories.
+    retrieve_key: memory_text  # memory_text | state_text
     top_k: 3   # Number of retrieved memories injected each time.
     min_retrieval_score: 0.0   # Minimum retrieval score threshold.
     only_successful: True   # Whether retrieval only searches memories from successful trajectories.
