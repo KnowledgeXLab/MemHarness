@@ -1,24 +1,38 @@
 set -x
+set -euo pipefail
 ENGINE=${1:-vllm}
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export CUDA_VISIBLE_DEVICES=0,1
+export HYDRA_FULL_ERROR=1
+
+GPU_NUM=2
+DATA_ROOT="data/verl-agent"
+TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
+VAL_FILE="${DATA_ROOT}/text/test.parquet"
 
 num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
 
 TASK_NAME="alfworld"
-MEMORY_ENABLED=False
-MEMORY_STORE_DIR=null
+
+MEMORY_ENABLED=True
+RETRIEVAL_MODE="fixed"    # agentic | fixed
+RETRIEVE_KEY="memory_text"  # memory_text | state_text
+EMBEDDING_API_URL="http://10.140.37.35:8081/v1"
 MEMORY_REBUILD_SOURCE_PATH="/home/wurong/workspace/MemAdaptor/data/AgentGym/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
-EMBEDDING_API_URL=null
 
 
-EXPERIMENT_NAME="Qwen2.5-3B-Instruct-no_memory"
+EXPERIMENT_NAME="Qwen2.5-1.5B-Instruct"
 EXPERIMENTS_ROOT="exp_results/MemAdaptor/pre_exp"
-DIR_DIR="/home/wurong/workspace/MemAdaptor/data/AgentGym"
-MODEL_PATH="/nvme/public_models/Qwen2.5-3B-Instruct"
+MODEL_PATH="/nvme/public_models/Qwen2.5-1.5B-Instruct"
+
+if [ "${MEMORY_ENABLED}" == "True" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}-retrieve_${RETRIEVE_KEY}"
+else
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}"
+fi
 
 
-RETRIEVAL_MODE="agentic"
-EMBEDDING_API_URL="http://10.140.37.68:8081/v1"
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
 RESULTS_DIR="${EXP_DIR}/results"
@@ -30,13 +44,14 @@ group_size=8
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
+    --local_dir "${DATA_ROOT}" \
     --train_data_size $train_data_size \
     --val_data_size $val_data_size
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/verl-agent/text/train.parquet \
-    data.val_files=$HOME/data/verl-agent/text/test.parquet \
+    data.train_files=${TRAIN_FILE} \
+    data.val_files=${VAL_FILE} \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=2048 \
@@ -44,7 +59,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-1.5B-Instruct \
+    actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -58,7 +73,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
@@ -77,16 +92,19 @@ python3 -m verl.trainer.main_ppo \
     env.memory.rebuild_source_path=${MEMORY_REBUILD_SOURCE_PATH} \
     env.memory.embedding_api_url=${EMBEDDING_API_URL} \
     env.memory.retrieval_mode=${RETRIEVAL_MODE} \
+    env.memory.retrieve_key=${RETRIEVE_KEY} \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
-    trainer.project_name='verl_agent_alfworld' \
+    trainer.logger=['console'] \
+    trainer.project_name='MemAdaptor_alfworld' \
     trainer.experiment_name=${EXPERIMENT_NAME} \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=${GPU_NUM} \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
+    trainer.rollout_data_dir=${EXP_DIR}/rollout \
+    trainer.validation_data_dir=${EXP_DIR}/val_data \
     trainer.val_before_train=True \
-    val_only=True $@
+    trainer.val_only=True $@

@@ -119,12 +119,23 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
         return postprocess_text_obs
 
     def step_with_memory(self, text_actions: List[str], current_obs=None, current_infos=None):
+        # Not agentic memory retrieval mode, skip memory retrieval
         if self._memory_retrieval_mode() != "agentic":
             return super().step_with_memory(text_actions, current_obs=current_obs, current_infos=current_infos)
 
+        # Extract memory queries from text actions
         query_texts = self._extract_memory_queries(text_actions)
+
+        # No memory-query tokens: run a normal env step. Do not call base step_with_memory (agentic mode raises NotImplementedError there).
         if not any(query_texts):
-            return super().step_with_memory(text_actions, current_obs=current_obs, current_infos=current_infos)
+            next_obs, rewards, dones, infos = self.step(text_actions)
+            for info in infos:
+                info["memory_action_type"] = "env_action"
+                info["memory_query_text"] = None
+                info["memory_injected_text"] = ""
+                info["memory_event"] = None
+            env_step_mask = np.ones(len(text_actions), dtype=bool)
+            return next_obs, rewards, dones, infos, env_step_mask
 
         actions, valids = self.projection_f(text_actions)
         current_raw_obs = list((current_obs or {}).get("anchor", []))
@@ -143,7 +154,7 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
                         "memory_query_text": query_text,
                         "memory_injected_text": "",
                         "memory_event": None,
-                        "won": False,
+                        "won": False,  # placeholder; not used for Search
                     }
                 )
                 continue
@@ -179,17 +190,19 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
 
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
-        # Find the last entry with active masks
-        for i in reversed(range(len(total_batch_list[batch_idx]))):
-            batch_item = total_batch_list[batch_idx][i]
-            if batch_item['active_masks']:
-                info = total_infos[batch_idx][i]
-                won_value = float(info['won'])
-                success['success_rate'].append(won_value)
-                
-                data_source = info.get("data_source")
-                success[f"{data_source}_success_rate"].append(won_value)
-                return  # Exit after finding the first active mask
+        latest_step = self._get_latest_effective_step(batch_idx, total_batch_list, total_infos)
+        if latest_step is None:
+            success['success_rate'].append(0.0)
+            success["unknown_success_rate"].append(0.0)
+            return
+
+        _, info = latest_step
+        won_value = float(info.get('won', False))
+        success['success_rate'].append(won_value)
+
+        data_source = info.get("data_source", "unknown")
+        success[f"{data_source}_success_rate"].append(won_value)
+        return
             
 
 class AlfWorldEnvironmentManager(EnvironmentManagerBase):
@@ -281,7 +294,16 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
 
         query_texts = self._extract_memory_queries(text_actions)
         if not any(query_texts):
-            return super().step_with_memory(text_actions, current_obs=current_obs)
+            # All env actions this step (no memory query): do not call base step_with_memory
+            # (it raises NotImplementedError in agentic mode). Match base non-agentic behavior.
+            next_obs, rewards, dones, infos = self.step(text_actions)
+            for info in infos:
+                info["memory_action_type"] = "env_action"
+                info["memory_query_text"] = None
+                info["memory_injected_text"] = ""
+                info["memory_event"] = None
+            env_step_mask = np.ones(len(text_actions), dtype=bool)
+            return next_obs, rewards, dones, infos, env_step_mask
 
         actions, valids = self.projection_f(text_actions, self.envs.get_admissible_commands)
         next_text_obs = list(self.pre_text_obs)
@@ -339,19 +361,19 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         return next_observations, rewards, dones, infos, env_step_mask
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
-        # Find the last entry with active masks
-        for i in reversed(range(len(total_batch_list[batch_idx]))):
-            batch_item = total_batch_list[batch_idx][i]
-            if batch_item['active_masks']:
-                info = total_infos[batch_idx][i]
-                won_value = float(info['won'])
-                success['success_rate'].append(won_value)
-                
-                # Process game file if it exists
-                gamefile = info.get("extra.gamefile")
-                if gamefile:
-                    self._process_gamefile(gamefile, won_value, success)
-                return  # Exit after finding the first active mask
+        latest_step = self._get_latest_effective_step(batch_idx, total_batch_list, total_infos)
+        if latest_step is None:
+            success['success_rate'].append(0.0)
+            return
+
+        _, info = latest_step
+        won_value = float(info.get('won', False))
+        success['success_rate'].append(won_value)
+
+        gamefile = info.get("extra.gamefile")
+        if gamefile:
+            self._process_gamefile(gamefile, won_value, success)
+        return
 
     def _process_gamefile(self, gamefile, won_value, success):
         tasks = [
@@ -641,7 +663,14 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
 
         query_texts = self._extract_memory_queries(text_actions)
         if not any(query_texts):
-            return super().step_with_memory(text_actions, current_obs=current_obs, current_infos=current_infos)
+            next_obs, rewards, dones, infos = self.step(text_actions)
+            for info in infos:
+                info["memory_action_type"] = "env_action"
+                info["memory_query_text"] = None
+                info["memory_injected_text"] = ""
+                info["memory_event"] = None
+            env_step_mask = np.ones(len(text_actions), dtype=bool)
+            return next_obs, rewards, dones, infos, env_step_mask
 
         actions, valids = self.projection_f(text_actions)
         next_raw_obs = list(self.pre_text_obs)
@@ -694,15 +723,18 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
         return next_observations, rewards, dones, infos, env_step_mask
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
-        for i in reversed(range(len(total_batch_list[batch_idx]))):
-            batch_item = total_batch_list[batch_idx][i]
-            if batch_item['active_masks']:
-                info = total_infos[batch_idx][i]
-                won_value = float(info['won'])
-                score_value = float(info['task_score'])
-                success['success_rate'].append(won_value)
-                success['webshop_task_score (not success_rate)'].append(score_value)
-                return
+        latest_step = self._get_latest_effective_step(batch_idx, total_batch_list, total_infos)
+        if latest_step is None:
+            success['success_rate'].append(0.0)
+            success['webshop_task_score (not success_rate)'].append(0.0)
+            return
+
+        _, info = latest_step
+        won_value = float(info.get('won', False))
+        score_value = float(info.get('task_score', 0.0))
+        success['success_rate'].append(won_value)
+        success['webshop_task_score (not success_rate)'].append(score_value)
+        return
 
 class AppWorldEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, projection_f, config):
@@ -796,7 +828,14 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
 
         query_texts = self._extract_memory_queries(text_actions)
         if not any(query_texts):
-            return super().step_with_memory(text_actions, current_obs=current_obs)
+            next_obs, rewards, dones, infos = self.step(text_actions)
+            for info in infos:
+                info["memory_action_type"] = "env_action"
+                info["memory_query_text"] = None
+                info["memory_injected_text"] = ""
+                info["memory_event"] = None
+            env_step_mask = np.ones(len(text_actions), dtype=bool)
+            return next_obs, rewards, dones, infos, env_step_mask
 
         actions, valids = self.projection_f(text_actions)
         next_text_obs = list(self.pre_text_obs)

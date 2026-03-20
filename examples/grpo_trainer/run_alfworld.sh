@@ -1,32 +1,33 @@
 set -x
 ENGINE=${1:-vllm}
-export VLLM_ATTENTION_BACKEND=XFORMERS
+
+# export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export CUDA_VISIBLE_DEVICES=0,1
+export HYDRA_FULL_ERROR=1
 
 num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
-MEMORY_ENABLED=${MEMORY_ENABLED:-False}
-MEMORY_BACKEND=${MEMORY_BACKEND:-milvus}
-MEMORY_STORE_DIR=${MEMORY_STORE_DIR:-null}
-MEMORY_REBUILD_SOURCE_PATH=${MEMORY_REBUILD_SOURCE_PATH:-null}
-MEMORY_COLLECTION_NAME=${MEMORY_COLLECTION_NAME:-null}
-MEMORY_VDB_BASE_URL=${MEMORY_VDB_BASE_URL:-null}
-EMBEDDING_API_URL=${EMBEDDING_API_URL:-null}
-MEMORY_TOP_K=${MEMORY_TOP_K:-3}
-RETRIEVAL_MODE=${RETRIEVAL_MODE:-fixed}
 
 train_data_size=16
 val_data_size=128
 group_size=8
 
+DATA_ROOT="data/verl-agent"
+TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
+VAL_FILE="${DATA_ROOT}/text/test.parquet"
+
+MODEL_PATH="/nvme/public_models/Qwen2.5-1.5B-Instruct"
+
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
+    --local_dir "${DATA_ROOT}" \
     --train_data_size $train_data_size \
     --val_data_size $val_data_size
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/verl-agent/text/train.parquet \
-    data.val_files=$HOME/data/verl-agent/text/test.parquet \
+    data.train_files=${TRAIN_FILE} \
+    data.val_files=${VAL_FILE} \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=2048 \
@@ -34,7 +35,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-1.5B-Instruct \
+    actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -62,19 +63,10 @@ python3 -m verl.trainer.main_ppo \
     env.env_name=alfworld/AlfredTWEnv \
     env.seed=0 \
     env.max_steps=50 \
-    env.memory.enabled=${MEMORY_ENABLED} \
-    env.memory.backend=${MEMORY_BACKEND} \
-    env.memory.store_dir=${MEMORY_STORE_DIR} \
-    env.memory.rebuild_source_path=${MEMORY_REBUILD_SOURCE_PATH} \
-    env.memory.collection_name=${MEMORY_COLLECTION_NAME} \
-    env.memory.vdb_base_url=${MEMORY_VDB_BASE_URL} \
-    env.memory.embedding_api_url=${EMBEDDING_API_URL} \
-    env.memory.top_k=${MEMORY_TOP_K} \
-    env.memory.retrieval_mode=${RETRIEVAL_MODE} \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name='verl_agent_alfworld' \
     trainer.experiment_name='grpo_qwen2.5_1.5b' \
     trainer.n_gpus_per_node=2 \

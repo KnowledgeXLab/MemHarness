@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 
@@ -8,11 +9,11 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from verl.memory.memory_store import SUPPORTED_MILVUS_INIT_MODES, VectorMemoryStore
+from agent_system.memory import MemoryStoreDispatcher, SUPPORTED_MEMORY_INIT_MODES
 
 
-def build_store(args: argparse.Namespace) -> VectorMemoryStore:
-    return VectorMemoryStore(
+def build_store(args: argparse.Namespace) -> MemoryStoreDispatcher:
+    return MemoryStoreDispatcher(
         backend="milvus",
         task_name=args.task_name,
         store_dir=args.store_dir,
@@ -28,17 +29,16 @@ def build_store(args: argparse.Namespace) -> VectorMemoryStore:
         retrieve_key=args.retrieve_key,
         rebuild_insert_batch_size=args.rebuild_insert_batch_size,
         rebuild_embedding_batch_size=args.rebuild_embedding_batch_size,
-        can_write=True,
     )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export or rebuild the local Milvus memory database.")
-    parser.add_argument("--action", default="rebuild", choices=["export", "rebuild"])
+    parser = argparse.ArgumentParser(description="Inspect, export, rebuild, or search the local Milvus memory database.")
+    parser.add_argument("--action", default="rebuild", choices=["export", "rebuild", "search"])
     parser.add_argument(
         "--mode",
         default="recreate",
-        choices=sorted(SUPPORTED_MILVUS_INIT_MODES),
+        choices=sorted(SUPPORTED_MEMORY_INIT_MODES),
         help=(
             "Milvus init mode: "
             "init_if_missing=use existing collection or create if missing; "
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source_collection_name", default=None)
     parser.add_argument("--output_path", default=None)
     parser.add_argument("--include_vectors", action="store_true")
-    parser.add_argument("--embedding_api_url", default="http://10.140.37.68:8081/v1")
+    parser.add_argument("--embedding_api_url", default="http://10.140.37.35:8081/v1")
     parser.add_argument("--embedding_api_key", default="empty")
     parser.add_argument("--embedding_model", default="bge_m3")
     parser.add_argument("--embedding_dim", type=int, default=1024)
@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_k", type=int, default=3)
     parser.add_argument("--min_score", type=float, default=0.1)
     parser.add_argument("--only_successful", action="store_true")
+    parser.add_argument("--query", default=None, help="Query text used when action=search.")
     parser.add_argument("--rebuild_insert_batch_size", type=int, default=1000)
     parser.add_argument("--rebuild_embedding_batch_size", type=int, default=256)
     parser.add_argument(
@@ -83,6 +84,26 @@ def main() -> None:
             print(f"Exported {exported} records to {args.output_path}")
             return
 
+        if args.action == "search":
+            store.initialize(mode="init_if_missing", clean_before_init=False)
+            if not args.query:
+                raise ValueError("--query is required when action=search")
+            retrieved = store.retrieve(query_text=args.query)
+            print(
+                json.dumps(
+                    {
+                        "query": args.query,
+                        "count": len(retrieved),
+                        "items": [item.to_dict() for item in retrieved],
+                        "db_path": os.path.join(args.store_dir, "milvus_memory.db"),
+                        "log_path": os.path.join(args.store_dir, "milvus_memory.log"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+
         if not args.source_path:
             raise ValueError("--source_path is required when action=rebuild")
         
@@ -94,7 +115,18 @@ def main() -> None:
             source_path=args.source_path,
             source_collection_name=args.source_collection_name,
         )
-        print(f"Rebuilt {rebuilt} records into {os.path.join(args.store_dir, 'milvus_memory.db')}")
+        print(
+            json.dumps(
+                {
+                    "rebuilt": rebuilt,
+                    "db_path": os.path.join(args.store_dir, "milvus_memory.db"),
+                    "log_path": os.path.join(args.store_dir, "milvus_memory.log"),
+                    "collection_name": args.collection_name,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     finally:
         store.close()
 

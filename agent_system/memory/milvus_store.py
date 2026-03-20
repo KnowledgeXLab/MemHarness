@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import re
 import time
@@ -85,7 +86,15 @@ class RemoteEmbeddingProvider:
 
 
 class MilvusMemoryStore:
-    """Local Milvus-Lite backed vector memory store for naive RAG retrieval."""
+    """Local Milvus-Lite backed vector memory store
+
+    Initialization modes (``env.memory.mode``):
+    - ``init_if_missing``: Open or create the local ``milvus_memory.db``. If the target
+      collection already exists, **do not** reload from ``rebuild_source_path`` even if it
+      points to a new ``.jsonl``; use ``recreate`` or ``clean_before_init`` to force rebuild.
+    - ``recreate``: Drop the target collection if present, then rebuild from
+      ``rebuild_source_path`` when that path is set (``.jsonl`` or ``.db``).
+    """
 
     def __init__(
         self,
@@ -109,6 +118,7 @@ class MilvusMemoryStore:
         self.task_name = task_name
         self.store_dir = os.path.abspath(store_dir)
         self.db_path = os.path.join(self.store_dir, "milvus_memory.db")
+        self.log_path = os.path.join(self.store_dir, "milvus_memory.log")
         self.collection_name = _normalize_collection_name(task_name=task_name, collection_name=collection_name)
         self.only_successful = only_successful
         self.top_k = top_k
@@ -116,6 +126,7 @@ class MilvusMemoryStore:
         self.timeout = timeout
         self.embedding_dim = embedding_dim
         self.retrieve_key = retrieve_key
+        # Optional path to seed the DB from a .jsonl export or another .db (see initialize()).
         self.rebuild_source_path = rebuild_source_path
         self.rebuild_source_collection_name = rebuild_source_collection_name
         self.rebuild_insert_batch_size = max(1, int(rebuild_insert_batch_size))
@@ -135,9 +146,17 @@ class MilvusMemoryStore:
         self._data_type = None
 
         os.makedirs(self.store_dir, exist_ok=True)
+        self.logger = self._build_logger()
         atexit.register(self.close)
 
     def initialize(self, mode: str, clean_before_init: bool = False) -> None:
+        """Attach to or create the local DB and optionally load vectors from ``rebuild_source_path``.
+
+        Rebuild from ``rebuild_source_path`` occurs only when that path is set **and**
+        (``mode == recreate`` **or** the target collection is missing). With
+        ``init_if_missing`` and an existing collection, a new ``.jsonl`` path alone does
+        **not** trigger reload; set ``mode=recreate`` or ``clean_before_init=True``.
+        """
         normalized_mode = str(mode).strip().lower()
         if normalized_mode not in SUPPORTED_MEMORY_INIT_MODES:
             raise ValueError(
@@ -145,34 +164,85 @@ class MilvusMemoryStore:
             )
 
         client = self._ensure_client()
+        self.logger.info(
+            "initialize store_dir=%s db_path=%s collection=%s mode=%s clean_before_init=%s rebuild_source_path=%s",
+            self.store_dir,
+            self.db_path,
+            self.collection_name,
+            normalized_mode,
+            clean_before_init,
+            self.rebuild_source_path,
+        )
 
+        # Delete local Milvus-Lite files sharing the same stem (e.g. milvus_memory.db*) so the next
+        # client opens a fresh store; use when you want to force a full re-import from rebuild_source_path.
         if clean_before_init and os.path.isdir(self.store_dir):
             self.close()
             db_stem = os.path.splitext(os.path.basename(self.db_path))[0]
+            removed: list[str] = []
             for entry in os.listdir(self.store_dir):
                 if entry.startswith(db_stem):
                     path = os.path.join(self.store_dir, entry)
                     if os.path.isfile(path):
                         os.remove(path)
+                        removed.append(path)
+            if removed:
+                self.logger.info(
+                    "clean_before_init removed %s file(s): %s",
+                    len(removed),
+                    removed,
+                )
+            else:
+                self.logger.info("clean_before_init: no files matched prefix '%s' under %s", db_stem, self.store_dir)
             client = self._ensure_client(force_new=True)
 
         collections = set(client.list_collections())
         if normalized_mode == "recreate" and self.collection_name in collections:
             client.drop_collection(self.collection_name)
             collections.remove(self.collection_name)
+            self.logger.info(
+                "initialize mode=recreate dropped existing collection=%s before optional rebuild",
+                self.collection_name,
+            )
 
+        # Rebuild when a source path is configured and either:
+        # - recreate: always reload from source after the drop above; or
+        # - init_if_missing: only when the collection is still absent (new DB or after clean_before_init).
+        # Otherwise init_if_missing keeps the existing collection and ignores a new .jsonl path.
         should_rebuild = bool(self.rebuild_source_path) and (
             normalized_mode == "recreate" or self.collection_name not in collections
         )
+        self.logger.info(
+            "rebuild decision: should_rebuild=%s mode=%s collection_in_store=%s collection=%s",
+            should_rebuild,
+            normalized_mode,
+            self.collection_name in collections,
+            self.collection_name,
+        )
         if should_rebuild:
+            self.logger.info(
+                "rebuilding vector store from source path=%s (mode=%s)",
+                self.rebuild_source_path,
+                normalized_mode,
+            )
             self.rebuild_from_path(
                 source_path=self.rebuild_source_path,
                 source_collection_name=self.rebuild_source_collection_name,
             )
             return
 
+        if self.rebuild_source_path and not should_rebuild:
+            self.logger.info(
+                "skipping rebuild from rebuild_source_path=%s: collection %s already exists and "
+                "mode=%s (use mode=recreate or clean_before_init=True to reload from JSONL/DB)",
+                self.rebuild_source_path,
+                self.collection_name,
+                normalized_mode,
+            )
+
         if self.collection_name not in collections:
             self._create_collection()
+            self.logger.info("created empty collection=%s (no rebuild from source)", self.collection_name)
 
     def add_records(self, records: Iterable[MemoryRecord]) -> None:
         buffered = list(records)
@@ -208,7 +278,8 @@ class MilvusMemoryStore:
                 }
             )
 
-        self._insert_entities_in_batches(entities)
+        inserted = self._insert_entities_in_batches(entities)
+        self.logger.info("add_records inserted=%s collection=%s", inserted, self.collection_name)
 
     def retrieve(self, query_text: str) -> list[RetrievedMemory]:
         if not query_text:
@@ -261,12 +332,31 @@ class MilvusMemoryStore:
                     value_source=entity.get("value_source"),
                 )
             )
+        self.logger.info(
+            "retrieve collection=%s top_k=%s returned=%s min_score=%.4f query=%s",
+            self.collection_name,
+            self.top_k,
+            len(retrieved),
+            self.min_score,
+            _safe_str(query_text, 20) + "..." if len(query_text) > 20 else query_text,
+        )
         return retrieved
 
     def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
+        """Load vectors into this store from a ``.jsonl`` export or another Milvus-Lite ``.db``.
+
+        Returns the number of rows inserted (see ``_rebuild_from_jsonl`` / ``_rebuild_from_db``).
+        """
         source_path = os.path.abspath(source_path)
         if not os.path.exists(source_path):
             raise FileNotFoundError(f"Memory rebuild source does not exist: {source_path}")
+        self.logger.info(
+            "rebuild_from_path start source=%s source_collection=%s target_collection=%s target_db=%s",
+            source_path,
+            source_collection_name,
+            self.collection_name,
+            self.db_path,
+        )
 
         if source_path.endswith(".jsonl"):
             return self._rebuild_from_jsonl(source_path)
@@ -287,6 +377,7 @@ class MilvusMemoryStore:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 exported += 1
+        self.logger.info("export_jsonl exported=%s output=%s", exported, output_path)
         return exported
 
     def update_records(self, updates: Iterable[dict]) -> int:
@@ -384,6 +475,7 @@ class MilvusMemoryStore:
         expr = ", ".join(f'"{memory_id}"' for memory_id in updated_ids)
         client.delete(collection_name=self.collection_name, filter=f"memory_id in [{expr}]")
         self._insert_entities_in_batches(updated_entities)
+        self.logger.info("update_records updated=%s collection=%s", len(updated_entities), self.collection_name)
         return len(updated_entities)
 
     def close(self) -> None:
@@ -396,6 +488,7 @@ class MilvusMemoryStore:
             except Exception:
                 pass
         self._client = None
+        self.logger.info("closed client db_path=%s", self.db_path)
 
     @property
     def _vector_field_name(self) -> str:
@@ -457,6 +550,18 @@ class MilvusMemoryStore:
     def _embed_texts(self, texts: list[str]) -> list[list[float]]:
         cleaned = [text if text else " " for text in texts]
         return self.embedding_provider.get_embeddings(cleaned)
+
+    def _build_logger(self) -> logging.Logger:
+        logger_name = f"memadaptor.milvus_store.{os.path.abspath(self.store_dir)}"
+        logger = logging.getLogger(logger_name)
+        if logger.handlers:
+            return logger
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        handler = logging.FileHandler(self.log_path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        logger.addHandler(handler)
+        return logger
 
     def _insert_entities_in_batches(self, entities: list[dict]) -> int:
         if not entities:
@@ -520,6 +625,7 @@ class MilvusMemoryStore:
         return records
 
     def _rebuild_from_db(self, source_db_path: str, source_collection_name: str | None = None) -> int:
+        """Copy vectors from another Milvus-Lite file into the current ``milvus_memory.db``."""
         client = self._ensure_client()
         source_client = self._milvus_client_cls(db_path=source_db_path)
         source_collection = source_collection_name or self.collection_name
@@ -540,13 +646,36 @@ class MilvusMemoryStore:
         close_fn = getattr(source_client, "close", None)
         if callable(close_fn):
             close_fn()
+        self.logger.info(
+            "rebuild_from_db complete target_db=%s target_collection=%s source_db=%s source_collection=%s rows_inserted=%s",
+            self.db_path,
+            self.collection_name,
+            source_db_path,
+            source_collection,
+            inserted,
+        )
         return inserted
 
     def _rebuild_from_jsonl(self, source_jsonl_path: str) -> int:
+        """Replace the target collection in the **current** ``milvus_memory.db`` with data from JSONL.
+
+        Drops the existing collection if present, recreates the schema, embeds text fields in batches,
+        and inserts. This overwrites in-place vectors for ``self.collection_name``; it does not create
+        a new filename.
+        """
         client = self._ensure_client()
         if self.collection_name in set(client.list_collections()):
             client.drop_collection(self.collection_name)
+            self.logger.info(
+                "_rebuild_from_jsonl dropped existing collection=%s before import",
+                self.collection_name,
+            )
         self._create_collection()
+        self.logger.info(
+            "_rebuild_from_jsonl created fresh collection=%s reading=%s",
+            self.collection_name,
+            source_jsonl_path,
+        )
 
         records: list[MemoryRecord] = []
         with open(source_jsonl_path, "r", encoding="utf-8") as handle:
@@ -564,6 +693,13 @@ class MilvusMemoryStore:
             chunk = records[start : start + self.rebuild_embedding_batch_size]
             self.add_records(chunk)
             inserted += len(chunk)
+        self.logger.info(
+            "rebuild_from_jsonl complete collection=%s target_db=%s source=%s records_inserted=%s",
+            self.collection_name,
+            self.db_path,
+            source_jsonl_path,
+            inserted,
+        )
         return inserted
 
     def _entity_from_row(self, row: dict) -> dict:

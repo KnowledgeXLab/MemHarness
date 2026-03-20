@@ -328,9 +328,24 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
+        count_query_as_step = bool(self.config.env.memory.count_query_as_step)
+        max_env_steps = max(1, int(self.config.env.max_steps))
+        max_rollout_rounds = max_env_steps * 4
+        rollout_rounds = 0
         # Trajectory collection loop
-        for _step in range(self.config.env.max_steps):
+        while True:
+            rollout_rounds += 1
+            if rollout_rounds > max_rollout_rounds:
+                print(
+                    f"Warning: stopping rollout after {max_rollout_rounds} model rounds "
+                    f"without all environments finishing. This is a safety cap for repeated memory-only turns."
+                )
+                break
+
+            is_done = np.logical_or(is_done, episode_lengths >= max_env_steps)
             active_masks = np.logical_not(is_done)
+            if not active_masks.any():
+                break
 
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
 
@@ -382,26 +397,37 @@ class TrajectoryCollector:
             else:
                 batch.non_tensor_batch['is_action_valid'] = np.ones(batch_size, dtype=bool)
             batch.non_tensor_batch['memory_action_type'] = np.array(
-                [info.memory_action_type for info in infos],
+                [info.get('memory_action_type', 'env_action') for info in infos],
                 dtype=object,
             )
             batch.non_tensor_batch['memory_query_text'] = np.array(
-                [info.memory_query_text for info in infos],
+                [info.get('memory_query_text') for info in infos],
                 dtype=object,
             )
             batch.non_tensor_batch['memory_injected_text'] = np.array(
-                [info.memory_injected_text for info in infos],
+                [info.get('memory_injected_text', '') for info in infos],
                 dtype=object,
             )
             batch.non_tensor_batch['env_step_mask'] = torch_to_numpy(env_step_mask, is_object=True)
+            memory_query_mask = np.array(
+                [info.get('memory_action_type') == 'memory_query' for info in infos],
+                dtype=bool,
+            )
+            batch.non_tensor_batch['memory_query_mask'] = memory_query_mask.astype(object)
 
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
             # Create reward tensor, only assign rewards for active environments
             # episode_rewards += torch_to_numpy(rewards) * torch_to_numpy(active_masks)
             effective_env_step_mask = np.logical_and(active_masks, env_step_mask)
+            counted_step_mask = effective_env_step_mask
+            if count_query_as_step:
+                counted_step_mask = np.logical_or(
+                    counted_step_mask,
+                    np.logical_and(active_masks, memory_query_mask),
+                )
             episode_rewards[effective_env_step_mask] += torch_to_numpy(rewards)[effective_env_step_mask]
-            episode_lengths[effective_env_step_mask] += 1
+            episode_lengths[counted_step_mask] += 1
 
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
@@ -416,6 +442,7 @@ class TrajectoryCollector:
 
             # Update done states
             is_done = np.logical_or(is_done, dones)
+            is_done = np.logical_or(is_done, episode_lengths >= max_env_steps)
                 
             # Update observations for next step
             obs = next_obs

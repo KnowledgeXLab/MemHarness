@@ -75,8 +75,8 @@ def start_local_memory_server(memory_config, task_name: str):
         return None
 
     backend = str(memory_config.backend).strip().lower()
-    base_url = memory_config.get("vdb_base_url")
-    auto_start = bool(memory_config.get("auto_start_server", False))
+    base_url = memory_config.vdb_base_url
+    auto_start = bool(memory_config.auto_start_server)
 
     if backend == "http" and base_url:
         return None
@@ -88,11 +88,11 @@ def start_local_memory_server(memory_config, task_name: str):
     memory_dir = _default_memory_dir(memory_config=memory_config)
     os.makedirs(memory_dir, exist_ok=True)
 
-    bind_host = str(memory_config.get("server_bind_host", "0.0.0.0"))
-    advertised_host = _resolve_advertised_host(memory_config.get("server_advertised_host"))
-    requested_port = int(memory_config.get("server_port", 8084))
+    bind_host = str(memory_config.server_bind_host)
+    advertised_host = _resolve_advertised_host(memory_config.server_advertised_host)
+    requested_port = int(memory_config.server_port)
     port = requested_port if requested_port > 0 else _find_free_port(bind_host)
-    startup_timeout = max(1, int(memory_config.get("server_startup_timeout", 60) or 60))
+    startup_timeout = max(1, int(memory_config.server_startup_timeout or 60))
     log_path = os.path.join(memory_dir, "memory_server.log")
 
     command = [
@@ -108,17 +108,17 @@ def start_local_memory_server(memory_config, task_name: str):
         "--store-dir",
         memory_dir,
         "--mode",
-        str(memory_config.get("mode", "init_if_missing")),
+        str(memory_config.mode),
         "--timeout",
-        str(memory_config.get("vdb_timeout", 30)),
+        str(memory_config.vdb_timeout),
         "--retrieve-key",
-        str(memory_config.get("retrieve_key", "memory_text")),
+        str(memory_config.retrieve_key),
         "--embedding-dim",
-        str(memory_config.get("embedding_dim", 1024)),
+        str(memory_config.embedding_dim),
         "--top-k",
-        str(memory_config.get("top_k", 3)),
+        str(memory_config.top_k),
         "--min-score",
-        str(memory_config.get("min_retrieval_score", 0.0)),
+        str(memory_config.min_retrieval_score),
     ]
 
     for flag_name, arg_name in [
@@ -129,7 +129,7 @@ def start_local_memory_server(memory_config, task_name: str):
         ("embedding_api_key", "--embedding-api-key"),
         ("embedding_model", "--embedding-model"),
     ]:
-        value = memory_config.get(flag_name)
+        value = getattr(memory_config, flag_name)
         if value:
             command.extend([arg_name, str(value)])
 

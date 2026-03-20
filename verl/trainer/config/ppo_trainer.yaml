@@ -295,43 +295,44 @@ env:
   max_steps: 50
   history_length: 2
   memory:
-    enabled: False
-    backend: milvus
-    mode: init_if_missing
-    store_dir: null
-    collection_name: null
-    clean_before_init: False
-    write_back: False
-    only_store_positive_reward: True
-    max_pairs_per_episode: 8
-    vdb_base_url: null
-    auto_start_server: True
-    server_bind_host: "0.0.0.0"
-    server_advertised_host: null
-    server_port: 8084
-    server_startup_timeout: 60
-    rebuild_source_path: null
-    rebuild_source_collection_name: null
-    embedding_api_url: null
-    embedding_api_key: "empty"
-    embedding_model: bge_m3
-    embedding_dim: 1024
-    vdb_timeout: 30
-    retrieve_key: memory_text
-    top_k: 3
-    min_retrieval_score: 0.0
-    only_successful: True
-    rebuild_insert_batch_size: 1000
-    rebuild_embedding_batch_size: 256
-    retrieval_mode: fixed
-    retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."
-    retrieval_query_open_tag: "<memory_retrieve>"
-    retrieval_query_close_tag: "</memory_retrieve>"
-    max_query_chars: 1200
-    max_state_chars: 1200
-    max_action_chars: 400
-    max_memory_chars: 1200
-    prompt_header: "Relevant past experiences are provided below. Reuse them only if they are consistent with the current state."
+    enabled: False   # Whether to enable the external memory module.
+    retrieval_mode: fixed   # fixed: retrieve on every observation; agentic: let the model decide when to retrieve.
+    backend: milvus   # Memory backend type. "milvus" for local VDB, "http" for remote/local service.
+    auto_start_server: True   # Whether to auto-start a local HTTP memory service.
+    mode: init_if_missing   # Initialization mode for the vector store.
+    store_dir: null   # Local directory for the memory database files.
+    collection_name: null   # Optional collection name; auto-generated when null.
+    clean_before_init: False   # Whether to clean existing local db files before initialization.
+    write_back: False   # Whether to write rollout trajectories back into memory online.
+    only_store_positive_reward: True   # When write_back is enabled, only keep positive-reward samples.
+    max_pairs_per_episode: 8   # When write_back is enabled, max number of memory pairs extracted from one episode.
+    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
+    vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
+    server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
+    server_advertised_host: null   # Host advertised to workers; auto-detected when null.
+    server_port: 8084   # Port for the local memory service. Use 0 for a random free port.
+    server_startup_timeout: 60   # Max seconds to wait for the memory service to become ready.
+    rebuild_source_path: null   # Optional path to rebuild memory from an existing .jsonl/.db source.
+    rebuild_source_collection_name: null   # Source collection name when rebuilding from a db file.
+    embedding_api_url: null   # Optional embedding API endpoint. Use local sentence-transformers when null.
+    embedding_api_key: "empty"   # API key for the embedding service.
+    embedding_model: bge_m3   # Embedding model name.
+    embedding_dim: 1024   # Embedding vector dimension.
+    vdb_timeout: 30   # Request timeout in seconds for the memory backend.
+    retrieve_key: memory_text   # Which text field to use as retrieval target from stored memories.
+    top_k: 3   # Number of retrieved memories injected each time.
+    min_retrieval_score: 0.0   # Minimum retrieval score threshold.
+    only_successful: True   # Whether retrieval only searches memories from successful trajectories.
+    rebuild_insert_batch_size: 1000   # Batch size for inserting records during rebuild.
+    rebuild_embedding_batch_size: 256   # Batch size for computing embeddings during rebuild.
+    retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."   # Prompt suffix used in agentic retrieval mode.
+    retrieval_query_open_tag: "<memory_retrieve>"   # Open tag for agentic retrieval queries.
+    retrieval_query_close_tag: "</memory_retrieve>"   # Close tag for agentic retrieval queries.
+    max_query_chars: 1200   # Max query length used for retrieval.
+    max_state_chars: 1200   # Max stored state text length.
+    max_action_chars: 400   # Max stored action text length.
+    max_memory_chars: 1200   # Max stored memory text length.
+    prompt_header: "Relevant past experiences are provided below. Reuse them only if they are consistent with the current state."   # Header inserted before retrieved memories.
   resources_per_worker: # resources for each env worker
     num_cpus: 0.1
     num_gpus: 0

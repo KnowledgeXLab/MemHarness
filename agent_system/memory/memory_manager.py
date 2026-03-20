@@ -27,7 +27,7 @@ class MemoryManager:
     def __init__(self, memory_config: DictConfig | None, task_name: str) -> None:
         self.config = memory_config
         self.task_name = task_name
-        self.enabled = bool(memory_config and memory_config.get("enabled", False))
+        self.enabled = bool(memory_config.enabled)
         self.store = None
 
         if not self.enabled:
@@ -37,7 +37,7 @@ class MemoryManager:
         if backend != "milvus" and backend != "http":
             raise ValueError(f"Unsupported memory backend for verl-agent: {backend}")
 
-        memory_dir = memory_config.get("store_dir")
+        memory_dir = memory_config.store_dir
         if not memory_dir:
             memory_dir = os.path.join(os.getcwd(), "memory_store", task_name.replace("/", "_"))
 
@@ -72,7 +72,7 @@ class MemoryManager:
     def retrieval_mode(self) -> str:
         if not self.enabled:
             return "disabled"
-        return str(self.config.get("retrieval_mode", "fixed")).strip().lower()
+        return str(self.config.retrieval_mode).strip().lower()
 
     def is_fixed_mode(self) -> bool:
         return self.retrieval_mode() == "fixed"
@@ -131,6 +131,7 @@ class MemoryManager:
         _, event = self.build_memory_message_and_event(state_text=state_text, query_text=query_text)
         return event
 
+    ## TODO: Implement this method
     def maybe_write_rollout_memories(self, **kwargs) -> list:
         # Reserved hook for future online write-back. Pre-experiment does not use it yet.
         del kwargs

@@ -10,6 +10,9 @@
 ## 1. ALFWorld
 Install with pip:
 ```bash
+conda create -n verl-agent-alfworld python==3.9 -y
+conda activate verl-agent-alfworld
+
 pip3 install gymnasium==0.29.1
 pip3 install stable-baselines3==2.6.0
 pip install alfworld

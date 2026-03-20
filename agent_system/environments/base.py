@@ -224,15 +224,34 @@ class EnvironmentManagerBase:
         assert len(success['success_rate']) == batch_size
 
         return {key: np.array(value) for key, value in success.items()}
-    
-    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+
+    def _get_latest_effective_step(self, batch_idx, total_batch_list, total_infos):
+        fallback = None
         for i in reversed(range(len(total_batch_list[batch_idx]))):
             batch_item = total_batch_list[batch_idx][i]
-            if batch_item['active_masks']:
-                info = total_infos[batch_idx][i]
-                won_value = float(info['won'])
-                success['success_rate'].append(won_value)
-                return
+            if not batch_item['active_masks']:
+                continue
+
+            info = total_infos[batch_idx][i]
+            if fallback is None:
+                fallback = (batch_item, info)
+
+            memory_action_type = info.get("memory_action_type", "env_action")
+            env_step_mask = bool(batch_item.get("env_step_mask", True))
+            if memory_action_type != "memory_query" or env_step_mask:
+                return batch_item, info
+
+        return fallback
+    
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        latest_step = self._get_latest_effective_step(batch_idx, total_batch_list, total_infos)
+        if latest_step is None:
+            success['success_rate'].append(0.0)
+            return
+
+        _, info = latest_step
+        won_value = float(info.get('won', False))
+        success['success_rate'].append(won_value)
             
     def save_image(self, image, step):
         """

@@ -11,27 +11,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Preprocess the Geometry3k dataset to parquet format
-"""
-
+import argparse
 import os
+
 import datasets
 
 from verl.utils.hdfs_io import copy, makedirs
-import argparse
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='visual', choices=['visual', 'text'])
-    parser.add_argument('--local_dir', default='~/data/verl-agent/')
+    parser.add_argument('--local_dir', default='data/verl-agent/')
     parser.add_argument('--hdfs_dir', default=None)
     parser.add_argument('--train_data_size', default=256, type=int)
     parser.add_argument('--val_data_size', default=256, type=int)
+    parser.add_argument('--overwrite', action='store_true')
 
     args = parser.parse_args()
     print(f"processing data for mode: {args.mode}")
-    args.local_dir = os.path.join(args.local_dir, args.mode)
+    args.local_dir = os.path.join(os.path.expanduser(args.local_dir), args.mode)
+    os.makedirs(args.local_dir, exist_ok=True)
+
+    train_output_path = os.path.join(args.local_dir, 'train.parquet')
+    test_output_path = os.path.join(args.local_dir, 'test.parquet')
+
+    if not args.overwrite and os.path.exists(train_output_path) and os.path.exists(test_output_path):
+        print(f"found existing parquet files under {args.local_dir}, reusing them")
+        if args.hdfs_dir is not None:
+            makedirs(args.hdfs_dir)
+            copy(src=args.local_dir, dst=args.hdfs_dir)
+        raise SystemExit(0)
 
     data_source = 'hiyouga/geometry3k'
     """
@@ -40,10 +49,14 @@ if __name__ == '__main__':
     See details: https://github.com/langfengQ/verl-agent?tab=readme-ov-file#2-data-preparation
     """
 
-    dataset = datasets.load_dataset(data_source)
-
-    train_dataset = dataset['train'].select(range(args.train_data_size))
-    test_dataset = dataset['test'].select(range(args.val_data_size))
+    if args.mode == 'text':
+        print("text mode uses synthetic placeholder samples, skipping remote dataset download")
+        train_dataset = datasets.Dataset.from_dict({'placeholder': [''] * args.train_data_size})
+        test_dataset = datasets.Dataset.from_dict({'placeholder': [''] * args.val_data_size})
+    else:
+        dataset = datasets.load_dataset(data_source)
+        train_dataset = dataset['train'].select(range(args.train_data_size))
+        test_dataset = dataset['test'].select(range(args.val_data_size))
 
     instruction_following = {
         "visual": "<image>",
@@ -54,19 +67,18 @@ if __name__ == '__main__':
     def make_map_fn(split):
 
         def process_fn(example, idx):
-            problem = example.pop('problem')
             prompt = instruction_following[args.mode]
-            # answer = example.pop('answer')
-            images = example.pop('images')
 
             if args.mode == 'visual':
+                if 'images' not in example:
+                    raise KeyError(f"'images' field not found in visual dataset example: {list(example.keys())}")
                 data = {
                     "data_source": args.mode,
                     "prompt": [{
                         "role": "user",
                         "content": prompt,
                     }],
-                    "images": images,
+                    "images": example['images'],
                     "ability": "agent",
                     "extra_info": {
                         'split': split,
@@ -96,8 +108,8 @@ if __name__ == '__main__':
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
 
-    train_dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
-    test_dataset.to_parquet(os.path.join(local_dir, 'test.parquet'))
+    train_dataset.to_parquet(train_output_path)
+    test_dataset.to_parquet(test_output_path)
 
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
