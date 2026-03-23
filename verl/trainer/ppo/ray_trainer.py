@@ -607,14 +607,23 @@ class RayPPOTrainer:
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
+        val_drop_last = bool(self.config.data.get("val_drop_last", False))
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
             num_workers=self.config.data.get("dataloader_num_workers", 8),
             shuffle=False,
-            drop_last=False,
+            drop_last=val_drop_last,
             collate_fn=collate_fn,
         )
+        if val_drop_last:
+            n_val = len(self.val_dataset)
+            dropped = n_val % val_batch_size if val_batch_size else 0
+            if dropped:
+                print(
+                    f"[dataloader] val_drop_last=True: up to {dropped} val sample(s) not evaluated "
+                    f"(dataset_size={n_val}, val_batch_size={val_batch_size})."
+                )
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"

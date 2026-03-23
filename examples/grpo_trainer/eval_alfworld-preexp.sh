@@ -10,26 +10,41 @@ export WANDB_MODE=offline
 
 GPU_NUM=2
 # Ray Object Store（Plasma）内存上限，单位 GiB；传给 ray_init.object_store_memory（字节）
-RAY_OBJECT_STORE_GIB=128
+RAY_OBJECT_STORE_GIB=96
 RAY_OBJECT_STORE_BYTES=$((RAY_OBJECT_STORE_GIB * 1024 * 1024 * 1024))
 
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
-VAL_FILE="${DATA_ROOT}/text/test.parquet"
+TEST_FILE="${DATA_ROOT}/text/test.parquet"
+
+# val_only 时只会跑 data.val_files 指向的 parquet：
+#   EVAL_ON_SPLIT=test（默认） -> test.parquet；val 环境为 eval 划分
+#   EVAL_ON_SPLIT=train        -> train.parquet 全量；须 VALIDATE_ON_TRAIN_SPLIT=True
+# 示例：EVAL_ON_SPLIT=train bash examples/grpo_trainer/eval_alfworld-preexp.sh
+EVAL_ON_SPLIT="train"  # train | test
+VALIDATE_ON_TRAIN_SPLIT=True
+if [ "${EVAL_ON_SPLIT}" = "train" ]; then
+  VAL_FILE="${TRAIN_FILE}"
+  VALIDATION_TRAJ_SUBDIR="train_traj"
+  VALIDATE_ON_TRAIN_SPLIT=True
+else
+  VAL_FILE="${TEST_FILE}"
+  VALIDATION_TRAJ_SUBDIR="val_traj"
+fi
 
 num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
 
 TASK_NAME="alfworld"
 
 MEMORY_ENABLED=True
-RETRIEVAL_MODE="fixed"    # agentic | fixed
+RETRIEVAL_MODE="agentic"    # agentic | fixed
 RETRIEVE_KEY="memory_text"  # memory_text | state_text
 EMBEDDING_API_URL="http://10.140.37.35:8081/v1"
 MEMORY_REBUILD_SOURCE_PATH="/home/wurong/workspace/MemAdaptor/data/AgentGym/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 
 
 EXPERIMENT_NAME="Qwen2.5-1.5B-Instruct"
-EXPERIMENTS_ROOT="exp_results/MemAdaptor/pre_exp"
+EXPERIMENTS_ROOT="data/exp_results/MemAdaptor/pre_exp"
 MODEL_PATH="/nvme/public_models/Qwen2.5-1.5B-Instruct"
 
 if [ "${MEMORY_ENABLED}" == "True" ]; then
@@ -49,8 +64,10 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
 train_data_size=16
-# 验证并行环境数（每批）；需整除 infer 得到的 val 样本数（常见 140→28 或 20）
-val_batch_size=20
+# 验证并行环境数 = AlfWorld val 并行 worker 数。若样本数不能整除 batch，须设 VAL_DROP_LAST=true（会丢掉最后不足一批，最多 val_batch_size-1 条）
+# 例：3553 训练集 + batch 8 -> 少评 1 条；或改用能整除的 batch（如 11/17/19）
+val_batch_size=4
+VAL_DROP_LAST=True
 group_size=8
 
 # 默认：从 AlfredTWEnv 推断 train/eval 全量可玩 game 数并生成占位 parquet（与轨迹条数一致）
@@ -74,9 +91,9 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=${VAL_FILE} \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_batch_size \
+    data.val_drop_last=${VAL_DROP_LAST} \
     data.max_prompt_length=2048 \
     data.max_response_length=512 \
-    data.train_drop_last=false \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
@@ -106,6 +123,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
     algorithm.use_kl_in_reward=False \
     env.env_name=alfworld/AlfredTWEnv \
+    env.alfworld.validate_on_train_split=${VALIDATE_ON_TRAIN_SPLIT} \
     env.seed=0 \
     env.max_steps=50 \
     env.memory.enabled=${MEMORY_ENABLED} \
@@ -125,6 +143,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
-    trainer.validation_data_dir=${EXP_DIR}/val_traj \
+    trainer.validation_data_dir=${EXP_DIR}/${VALIDATION_TRAJ_SUBDIR} \
     trainer.val_before_train=True \
     trainer.val_only=True $@
