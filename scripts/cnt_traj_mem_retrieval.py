@@ -57,7 +57,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="统计 validation JSONL（_dump_validation_trajectories_jsonl）中带记忆检索的轨迹数"
     )
-    ap.add_argument("--path", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/val_traj/0.jsonl", type=str, help="jsonl 文件路径，或包含 jsonl 的目录")
+    ap.add_argument("--path", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/train_traj/0.jsonl", type=str, help="jsonl 文件路径，或包含 jsonl 的目录")
     ap.add_argument(
         "--glob",
         dest="glob_pat",

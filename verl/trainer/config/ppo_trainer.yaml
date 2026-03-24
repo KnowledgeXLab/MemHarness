@@ -272,6 +272,9 @@ trainer:
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   # Validation JSONL: one object per trajectory; nested ``turns`` for each env step (see RayPPOTrainer._dump_validation_trajectories_jsonl).
   validation_data_dir: null
+  # If > 0, append every N **new** trajectories (by first-seen order) to ``{global_steps}_live.jsonl`` during validation.
+  # Full dump to ``{global_steps}.jsonl`` still runs once at the end. 0 = disabled.
+  val_dump_every_n_trajs: 0
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

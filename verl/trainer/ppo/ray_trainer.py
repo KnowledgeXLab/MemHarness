@@ -27,7 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Set, Type
 
 import numpy as np
 import ray
@@ -713,6 +713,18 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @staticmethod
+    def _ordered_unique_traj_uids_first_seen(traj_uids: np.ndarray) -> list[str]:
+        """Stable order: first time a uid appears in the flattened row list."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for u in np.asarray(traj_uids).reshape(-1):
+            s = str(u)
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
     def _dump_validation_trajectories_jsonl(
         self,
         traj_uids: np.ndarray,
@@ -726,29 +738,80 @@ class RayPPOTrainer:
         sample_scores: list,
         success_meta_rows: Optional[list],
         dump_path: str,
+        *,
+        output_filename: Optional[str] = None,
+        file_mode: str = "w",
+        uid_allowlist: Optional[Set[str]] = None,
     ):
-        """Dump validation rollouts as JSONL: **one line per trajectory** with nested ``turns``."""
+        """Dump validation rollouts as JSONL: **one line per trajectory** with nested ``turns``.
+
+        If ``uid_allowlist`` is set, only trajectories whose uid is in the set are written
+        (all step-rows for those uids must be present in the parallel arrays).
+        """
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        base_name = output_filename if output_filename is not None else f"{self.global_steps}.jsonl"
+        filename = os.path.join(dump_path, base_name)
+
+        tu = np.asarray(traj_uids).reshape(-1)
+        ds = np.asarray(data_sources).reshape(-1)
+        tc = np.asarray(tool_callings).reshape(-1)
+        n = len(tu)
+        if n != len(ds) or n != len(tc) or len(sample_inputs) != n or len(sample_outputs) != n or len(sample_scores) != n:
+            raise ValueError(
+                f"length mismatch in validation dump: traj_uids={n}, data_sources={len(ds)}, "
+                f"tool_callings={len(tc)}, sample_inputs={len(sample_inputs)}, "
+                f"sample_outputs={len(sample_outputs)}, sample_scores={len(sample_scores)}"
+            )
+        if episode_lengths_all is not None and len(np.asarray(episode_lengths_all).reshape(-1)) != n:
+            raise ValueError("episode_lengths_all length mismatch")
+        if memory_retrieval_all is not None and len(np.asarray(memory_retrieval_all).reshape(-1)) != n:
+            raise ValueError("memory_retrieval_all length mismatch")
+        if success_meta_rows is not None and len(success_meta_rows) != n:
+            raise ValueError(f"success_meta_rows length mismatch: {len(success_meta_rows)} vs {n}")
+
+        if uid_allowlist is not None:
+            if not uid_allowlist:
+                return
+            mask = np.array([str(u) in uid_allowlist for u in tu], dtype=bool)
+            if not np.any(mask):
+                return
+            tu = tu[mask]
+            ds = ds[mask]
+            tc = tc[mask]
+            if episode_lengths_all is not None:
+                episode_lengths_all = np.asarray(episode_lengths_all).reshape(-1)[mask]
+            if memory_retrieval_all is not None:
+                memory_retrieval_all = np.asarray(memory_retrieval_all).reshape(-1)[mask]
+            if torch.is_tensor(rewards_per_row):
+                idx_np = np.nonzero(mask)[0].astype(np.int64, copy=False)
+                idx_t = torch.as_tensor(idx_np, device=rewards_per_row.device, dtype=torch.long)
+                rewards_per_row = rewards_per_row[idx_t]
+            else:
+                rewards_per_row = torch.as_tensor(rewards_per_row)[mask]
+            sample_inputs = [sample_inputs[i] for i in range(n) if mask[i]]
+            sample_outputs = [sample_outputs[i] for i in range(n) if mask[i]]
+            sample_scores = [sample_scores[i] for i in range(n) if mask[i]]
+            if success_meta_rows is not None:
+                success_meta_rows = [success_meta_rows[i] for i in range(n) if mask[i]]
 
         rewards_np = rewards_per_row.detach().cpu().numpy() if torch.is_tensor(rewards_per_row) else np.asarray(rewards_per_row)
 
         indices_by_traj: Dict[str, list] = defaultdict(list)
-        for i, uid in enumerate(traj_uids):
+        for i, uid in enumerate(tu):
             indices_by_traj[str(uid)].append(i)
 
         ordered_uids = sorted(indices_by_traj.keys())
-        with open(filename, "w", encoding="utf-8") as f:
+        with open(filename, file_mode, encoding="utf-8") as f:
             for uid in ordered_uids:
                 inds = sorted(indices_by_traj[uid])
                 i0 = inds[0]
                 rec = {
                     "global_step": int(self.global_steps),
                     "traj_uid": uid,
-                    "data_source": str(data_sources[i0]),
+                    "data_source": str(ds[i0]),
                     "episode_length": float(episode_lengths_all[i0]) if episode_lengths_all is not None else None,
                     "memory_retrieval_count": float(memory_retrieval_all[i0]) if memory_retrieval_all is not None else None,
-                    "tool_callings": float(tool_callings[i0]),
+                    "tool_callings": float(tc[i0]),
                     "episode_reward": float(rewards_np[i0]),
                     "num_turns": len(inds),
                     "turns": [
@@ -768,7 +831,8 @@ class RayPPOTrainer:
                         rec["episode_gamefile"] = meta["episode_gamefile"]
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        print(f"Dumped {len(ordered_uids)} validation trajectories (one JSON object per line) to {filename}")
+        tag = " (incremental)" if uid_allowlist is not None else ""
+        print(f"Dumped {len(ordered_uids)} validation trajectories{tag} to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -808,6 +872,11 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+
+        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        val_dump_every_n = int(self.config.trainer.get("val_dump_every_n_trajs", 0) or 0)
+        last_dumped_unique_traj_count = 0
+        val_live_file_started = False
 
         try:
             _val_num_batches = len(self.val_dataloader)
@@ -930,6 +999,41 @@ class RayPPOTrainer:
                 step_rows=int(reward_tensor.shape[0]),
             )
 
+            # Incremental trajectory dump: every N **new** traj_uids (first-seen order), append to ``{global_steps}_live.jsonl``.
+            if val_data_dir and val_dump_every_n > 0 and traj_uid_list:
+                traj_uids_so_far = np.concatenate(traj_uid_list, axis=0)
+                ordered_uids = self._ordered_unique_traj_uids_first_seen(traj_uids_so_far)
+                while len(ordered_uids) - last_dumped_unique_traj_count >= val_dump_every_n:
+                    chunk_uids = ordered_uids[
+                        last_dumped_unique_traj_count : last_dumped_unique_traj_count + val_dump_every_n
+                    ]
+                    last_dumped_unique_traj_count += len(chunk_uids)
+                    allow = set(chunk_uids)
+                    data_sources_so_far = np.concatenate(data_source_lst, axis=0)
+                    tool_so_far = np.concatenate(tool_calling_list, axis=0)
+                    ep_so_far = np.concatenate(episode_length_list, axis=0) if episode_length_list else None
+                    mem_so_far = np.concatenate(memory_retrieval_list, axis=0) if memory_retrieval_list else None
+                    reward_so_far = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()
+                    live_name = f"{self.global_steps}_live.jsonl"
+                    mode = "w" if not val_live_file_started else "a"
+                    val_live_file_started = True
+                    self._dump_validation_trajectories_jsonl(
+                        traj_uids=traj_uids_so_far,
+                        data_sources=data_sources_so_far,
+                        tool_callings=tool_so_far,
+                        episode_lengths_all=ep_so_far,
+                        memory_retrieval_all=mem_so_far,
+                        rewards_per_row=reward_so_far,
+                        sample_inputs=sample_inputs,
+                        sample_outputs=sample_outputs,
+                        sample_scores=sample_scores,
+                        success_meta_rows=success_meta_rows,
+                        dump_path=val_data_dir,
+                        output_filename=live_name,
+                        file_mode=mode,
+                        uid_allowlist=allow,
+                    )
+
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
@@ -1006,8 +1110,7 @@ class RayPPOTrainer:
         for k, v in success_rate.items():
             metric_dict[f'val/{k}'] = v
 
-        # One JSON line per trajectory (nested turns)
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        # One JSON line per trajectory (nested turns); full snapshot (not filtered by val_dump_every_n_trajs)
         if val_data_dir:
             assert (
                 len(success_meta_rows) == len(sample_inputs) == len(sample_outputs) == len(sample_scores)

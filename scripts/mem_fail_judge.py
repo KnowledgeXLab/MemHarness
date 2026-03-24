@@ -21,13 +21,6 @@
 
     # 先看 prompt 不调用 API
     python scripts/mem_fail_judge.py -i val.jsonl --dry_run --max_trajectories 2
-
-长轨迹（如 50 步）可限制送入 judge 的步数，避免超出上下文::
-
-    # 超过 32 步时只保留前 16 步 + 后 16 步，再按字符截断
-    python scripts/mem_fail_judge.py -i val.jsonl -o out.jsonl \\
-        --episode_max_turns 32 --episode_head_turns 16 --episode_tail_turns 16 \\
-        --max_chars_episode 100000
 """
 
 from __future__ import annotations
@@ -37,9 +30,13 @@ import concurrent.futures
 import json
 import os
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+# 注入格式与 ``agent_system/memory/memory_manager.py`` 的 ``_format_memory_prompt`` 一致：``memory 1:`` …（通常 top_k=3）
+_MEMORY_LINE_RE = re.compile(r"^memory\s+(\d+)\s*:\s*(.*)$", re.MULTILINE)
 
 import httpx
 from openai import OpenAI
@@ -61,6 +58,7 @@ Important:
 - The episode text may be **truncated** (first + last turns only) to fit context; if so, a note appears at the top of the transcript. Still do your best, and weight evidence from **later visible steps** more heavily when judging the final failure.
 - If you cannot find any plausible memory-related issue in the text, prefer non_memory_failure.
 - Prefer non_memory_failure when the dominant issue is misunderstanding instructions, bad planning, wrong action syntax, or exploration noise — not memory content.
+- When **Authoring metadata for injected memories** is provided, it lists only **subgoal / preconditions / why_useful** from the memory bank (matched to injected ``memory k:`` lines). Use **preconditions** vs current observations to separate **experience_failure** from **usage_failure**, and retrieval quality for **query_failure**.
 - Output valid JSON only, no markdown fences, no extra keys beyond the schema.
 """
 
@@ -81,11 +79,19 @@ USER_PROMPT_TEMPLATE = """## Taxonomy (choose exactly one primary_label)
 
 ## How to read the episode
 
-The next section is the **only** evidence. It is a step-by-step log:
+The **episode transcript** is the primary evidence. It is a step-by-step log:
 - **INPUT** = everything the policy receives at that step (observation + dialogue + any memory injection text).
 - **OUTPUT** = the policy's textual reply / action.
 
 Do **not** rely on any external IDs, training step numbers, dataset indices, or scalar aggregate rewards — they are not provided on purpose.
+
+## Authoring metadata for injected memories (from memory bank JSONL)
+
+The following blocks are **not** shown to the agent at runtime; they are **offline authoring fields** (subgoal, preconditions, why_useful) for each **injected** ``memory k: ...`` line parsed from INPUT, matched by string lookup against the memory bank.
+
+{memory_authoring_context}
+
+## Episode transcript
 
 {episode_transcript}
 
@@ -106,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="LLM judge for memory-related failure taxonomy on validation trajectory JSONL."
     )
-    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/val_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
+    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/train_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
     p.add_argument(
         "--output",
         "-o",
@@ -115,11 +121,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--base_url", default="http://35.220.164.252:3888/v1/", help="OpenAI-compatible API base URL.")
     p.add_argument("--model", default="gpt-5.1", help="Judge model name.")
-    p.add_argument("--api_key", default="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH", help="OpenAI API key.")
+    p.add_argument("--api_key", default="sk-LCNRSkN5fnAsRTJ8a5VUvyQznlWR2LJEpVCAoRhhodxx8Ls2", help="OpenAI API key.")
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--max_tokens", type=int, default=2048)
     p.add_argument("--timeout", type=int, default=120)
-    p.add_argument("--max_workers", type=int, default=10, help="Concurrent LLM calls.")
+    p.add_argument("--max_workers", type=int, default=20, help="Concurrent LLM calls.")
     p.add_argument("--max_trajectories", type=int, default=-1, help="Cap number of trajectories to judge (-1 = all).")
     p.add_argument(
         "--reward_threshold",
@@ -134,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--only_with_memory",
-        default=False,
+        default=True,
         type=bool,
         help="Only judge trajectories with memory_retrieval_count > 0.",
     )
@@ -161,8 +167,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max_chars_episode",
         type=int,
-        default=400000,
+        default=800000,
         help="Hard cap on episode transcript characters (after turn selection); tail is cut if exceeded.",
+    )
+    p.add_argument(
+        "--memory_records_jsonl",
+        default="data/AgentGym/AgentTraj-L/alfworld_train_memory_records-gpt-5.1.jsonl",
+        help="Memory bank JSONL; build index on memory_text for lookup. Empty string disables.",
+    )
+    p.add_argument(
+        "--memory_meta_max_chars",
+        type=int,
+        default=100000,
+        help="Max characters for the authoring-metadata section (0 = unlimited).",
+    )
+    p.add_argument(
+        "--memory_fuzzy_match",
+        action="store_true",
+        help="If set, fall back to substring match (normalized) when exact memory_text key misses.",
     )
     return p.parse_args()
 
@@ -214,6 +236,216 @@ def extract_json_object(text: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
+
+
+def normalize_memory_text_key(text: str) -> str:
+    """Match keys between injected ``memory k:`` lines and JSONL ``memory_text``."""
+    return " ".join((text or "").strip().split())
+
+
+def parse_injected_memory_lines(input_text: str) -> list[tuple[int, str]]:
+    """Parse ``memory_manager._format_memory_prompt`` lines: ``memory 1: ...`` (top_k typically 3)."""
+    out: list[tuple[int, str]] = []
+    for m in _MEMORY_LINE_RE.finditer(input_text or ""):
+        try:
+            rank = int(m.group(1))
+        except ValueError:
+            continue
+        body = (m.group(2) or "").strip()
+        if body:
+            out.append((rank, body))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def load_memory_bank_text_index(path: str) -> tuple[dict[str, dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
+    """``normalized memory_text`` -> first JSON row; also return list for optional fuzzy match."""
+    exact: dict[str, dict[str, Any]] = {}
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    with open(path, encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{line_no}: invalid JSON: {e}") from e
+            mt = rec.get("memory_text")
+            if not isinstance(mt, str) or not mt.strip():
+                continue
+            k = normalize_memory_text_key(mt)
+            pairs.append((k, rec))
+            if k not in exact:
+                exact[k] = rec
+    return exact, pairs
+
+
+def lookup_memory_record(
+    injected_line: str,
+    exact: dict[str, dict[str, Any]],
+    pairs: list[tuple[str, dict[str, Any]]],
+    *,
+    use_fuzzy: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    k = normalize_memory_text_key(injected_line)
+    if not k:
+        return None, "empty_injection"
+    if k in exact:
+        return exact[k], "exact"
+    if not use_fuzzy:
+        return None, "miss"
+    best: dict[str, Any] | None = None
+    best_key_len = -1
+    for bk, rec in pairs:
+        if not bk:
+            continue
+        if bk in k or k in bk:
+            if len(bk) > best_key_len:
+                best = rec
+                best_key_len = len(bk)
+    if best is not None:
+        return best, "fuzzy_substring"
+    return None, "miss"
+
+
+def build_memory_authoring_context_from_injections(
+    turns: list[dict[str, Any]],
+    exact: dict[str, dict[str, Any]],
+    pairs: list[tuple[str, dict[str, Any]]],
+    *,
+    use_fuzzy: bool,
+    max_total_chars: int,
+    per_field_max: int = 1400,
+) -> tuple[str, dict[str, Any]]:
+    """Scan every turn INPUT for ``memory k:`` lines; match JSONL by memory_text string."""
+    dbg: dict[str, Any] = {
+        "n_injected_lines": 0,
+        "n_unique_injected": 0,
+        "match_exact": 0,
+        "match_fuzzy": 0,
+        "miss": 0,
+        "injection_turns": [],
+    }
+    if not exact and not pairs:
+        return (
+            "(Memory bank index is empty or not loaded; cannot attach authoring metadata.)\n",
+            dbg,
+        )
+
+    # unique normalized injection -> list of (turn_idx, rank, raw_snippet, match)
+    seen: dict[str, dict[str, Any]] = {}
+    ordered_keys: list[str] = []
+
+    ordered_turns = sorted(turns, key=_safe_turn_index) if turns else []
+    for t in ordered_turns:
+        turn_idx = _safe_turn_index(t)
+        inp = str(t.get("input", ""))
+        for rank, snippet in parse_injected_memory_lines(inp):
+            dbg["n_injected_lines"] += 1
+            nk = normalize_memory_text_key(snippet)
+            if not nk:
+                continue
+            rec, how = lookup_memory_record(snippet, exact, pairs, use_fuzzy=use_fuzzy)
+            if how == "exact":
+                dbg["match_exact"] += 1
+            elif how == "fuzzy_substring":
+                dbg["match_fuzzy"] += 1
+            elif how == "miss":
+                dbg["miss"] += 1
+            if nk not in seen:
+                seen[nk] = {
+                    "snippet": snippet,
+                    "turn_ranks": [],
+                    "record": rec,
+                    "how": how,
+                }
+                ordered_keys.append(nk)
+            seen[nk]["turn_ranks"].append((turn_idx, rank))
+            _how_rank = {"miss": 0, "empty_injection": 0, "fuzzy_substring": 1, "exact": 2}
+            cur = seen[nk]["how"]
+            if _how_rank.get(how, 0) > _how_rank.get(cur, 0):
+                seen[nk]["record"] = rec
+                seen[nk]["how"] = how
+            elif rec is not None and seen[nk]["record"] is None:
+                seen[nk]["record"] = rec
+                seen[nk]["how"] = how
+
+    dbg["n_unique_injected"] = len(ordered_keys)
+    dbg["injection_turns"] = [
+        {"normalized_key_preview": k[:80], "turn_ranks": seen[k]["turn_ranks"], "match": seen[k]["how"]}
+        for k in ordered_keys
+    ]
+
+    if not ordered_keys:
+        return (
+            "(No ``memory 1:`` / ``memory 2:`` … lines were found in any INPUT; nothing to match.)\n",
+            dbg,
+        )
+
+    def trunc(s: str, n: int) -> str:
+        s = str(s).strip()
+        if n <= 0 or len(s) <= n:
+            return s
+        return s[: n - 25] + "\n[... truncated ...]\n"
+
+    parts: list[str] = []
+    body_len = 0
+    for nk in ordered_keys:
+        info = seen[nk]
+        tr = info["turn_ranks"]
+        loc = ", ".join(f"turn#{ti + 1}:rank{r}" for ti, r in tr[:8])
+        if len(tr) > 8:
+            loc += ", ..."
+        head = f"### Injected memory (as in INPUT) @ {loc}\n"
+        head += f"- **text**: {trunc(info['snippet'], 2500)}\n"
+        head += f"- **bank_lookup**: {info['how']}\n"
+        rec = info["record"]
+        if rec is None:
+            chunk = head + "- **metadata**: *(no matching row in memory JSONL)*\n\n"
+        else:
+            # 只给 judge 与「前提是否成立 / 是否该用这条经验」相关的短字段；不写库构建时的 id、轨迹位置、长 state 等
+            meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+            chunk = head
+            has_any = bool(
+                (meta.get("subgoal") or "").strip()
+                or (meta.get("preconditions") or "").strip()
+                or (meta.get("why_useful") or "").strip()
+            )
+            if has_any:
+                if (meta.get("subgoal") or "").strip():
+                    chunk += f"- **subgoal** (authored): {trunc(str(meta.get('subgoal', '')), per_field_max)}\n"
+                if (meta.get("preconditions") or "").strip():
+                    chunk += f"- **preconditions** (authored): {trunc(str(meta.get('preconditions', '')), per_field_max)}\n"
+                if (meta.get("why_useful") or "").strip():
+                    chunk += f"- **why_useful** (authored): {trunc(str(meta.get('why_useful', '')), per_field_max)}\n"
+            else:
+                chunk += "- *(Matched memory bank row but no subgoal/preconditions/why_useful in metadata.)*\n"
+            chunk += "\n"
+        if max_total_chars > 0 and body_len + len(chunk) > max_total_chars:
+            parts.append("\n[... additional injected memories omitted: memory_meta_max_chars ...]\n")
+            break
+        parts.append(chunk)
+        body_len += len(chunk)
+
+    return "".join(parts), dbg
+
+
+def attach_memory_text_index(args: argparse.Namespace) -> None:
+    args.memory_text_exact = {}
+    args.memory_text_pairs = []
+    raw = (getattr(args, "memory_records_jsonl", None) or "").strip()
+    if not raw:
+        return
+    mp = Path(raw)
+    if not mp.is_file():
+        print(f"mem_fail_judge: warning: --memory_records_jsonl not a file ({mp}); metadata disabled.", file=sys.stderr)
+        return
+    args.memory_text_exact, args.memory_text_pairs = load_memory_bank_text_index(str(mp))
+    print(
+        f"mem_fail_judge: loaded {len(args.memory_text_exact)} unique memory_text keys from {mp}",
+        file=sys.stderr,
+    )
 
 
 def _select_turns_for_prompt(
@@ -379,9 +611,19 @@ def select_rows(
     return out
 
 
-def default_output_path(input_path: str) -> str:
-    p = Path(input_path)
-    return str(p.with_name(p.name + ".mem_judge.jsonl"))
+def default_output_path(input_path: str, args: argparse.Namespace) -> Path:
+
+    if args.only_with_memory:
+        out_path = input_path.replace(".jsonl", ".mem_judge-only-mem.jsonl")
+    else:
+        out_path = input_path.replace(".jsonl", ".mem_judge-all.jsonl")
+    
+    if args.include_success:
+        out_path = out_path.replace(".jsonl", "_trajs.jsonl")
+    else:
+        out_path = out_path.replace(".jsonl", "_fail_trajs.jsonl")
+
+    return Path(out_path)
 
 
 def process_one(
@@ -401,7 +643,17 @@ def process_one(
         max_chars=args.max_chars_episode,
     )
 
-    user_prompt = USER_PROMPT_TEMPLATE.format(episode_transcript=episode_transcript)
+    mem_ctx, mem_dbg = build_memory_authoring_context_from_injections(
+        turns,
+        getattr(args, "memory_text_exact", {}) or {},
+        getattr(args, "memory_text_pairs", []) or [],
+        use_fuzzy=bool(getattr(args, "memory_fuzzy_match", False)),
+        max_total_chars=int(getattr(args, "memory_meta_max_chars", 0) or 0),
+    )
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        memory_authoring_context=mem_ctx,
+        episode_transcript=episode_transcript,
+    )
 
     result: dict[str, Any] = {
         "traj_uid": rec.get("traj_uid"),
@@ -411,6 +663,7 @@ def process_one(
         "memory_retrieval_count": rec.get("memory_retrieval_count"),
         "num_turns": rec.get("num_turns"),
         "transcript_truncation": trunc_meta,
+        "memory_lookup_debug": mem_dbg,
         "judge_model": args.model,
         "user_prompt": user_prompt,
         "judge_raw": None,
@@ -458,12 +711,13 @@ def summarize_counts(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    attach_memory_text_index(args)
     rows = _iter_jsonl(args.input)
     selected = select_rows(rows, args)
     if args.max_trajectories > 0:
         selected = selected[: args.max_trajectories]
 
-    out_path = args.output or default_output_path(args.input)
+    out_path = args.output or default_output_path(args.input, args)
     if Path(out_path).exists() and not args.overwrite and not args.dry_run:
         raise FileExistsError(f"{out_path} exists; pass --overwrite to replace.")
 
@@ -500,7 +754,7 @@ def main() -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     summary = summarize_counts(results)
-    print(json.dumps({"output": out_path, **summary}, ensure_ascii=False, indent=2))
+    print(json.dumps({"output": str(out_path), **summary}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

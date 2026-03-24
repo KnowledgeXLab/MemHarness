@@ -10,7 +10,7 @@ export WANDB_MODE=offline
 
 GPU_NUM=2
 # Ray Object Store（Plasma）内存上限，单位 GiB；传给 ray_init.object_store_memory（字节）
-RAY_OBJECT_STORE_GIB=96
+RAY_OBJECT_STORE_GIB=160
 RAY_OBJECT_STORE_BYTES=$((RAY_OBJECT_STORE_GIB * 1024 * 1024 * 1024))
 
 DATA_ROOT="data/verl-agent"
@@ -63,12 +63,12 @@ LOG_FILE="${EXP_DIR}/eval_alfworld-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
-train_data_size=16
+train_data_size=2
 # 验证并行环境数 = AlfWorld val 并行 worker 数。若样本数不能整除 batch，须设 VAL_DROP_LAST=true（会丢掉最后不足一批，最多 val_batch_size-1 条）
 # 例：3553 训练集 + batch 8 -> 少评 1 条；或改用能整除的 batch（如 11/17/19）
-val_batch_size=4
+val_batch_size=128
 VAL_DROP_LAST=True
-group_size=8
+group_size=1
 
 # 默认：从 AlfredTWEnv 推断 train/eval 全量可玩 game 数并生成占位 parquet（与轨迹条数一致）
 # 首次或需改条数：PREPARE_OVERWRITE=1 bash examples/grpo_trainer/eval_alfworld-preexp.sh
