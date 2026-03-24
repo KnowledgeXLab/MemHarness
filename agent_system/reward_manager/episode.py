@@ -54,9 +54,13 @@ class EpisodeRewardManager:
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
-            # decode
+            # decode (prefer API text when using openai_api rollout)
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
+            api_txt = data_item.non_tensor_batch.get("api_response_text")
+            if api_txt is not None:
+                response_str = str(api_txt)
+            else:
+                response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
             # ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
 

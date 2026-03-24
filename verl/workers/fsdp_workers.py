@@ -396,12 +396,24 @@ class ActorRolloutRefWorker(Worker):
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
 
+        # OpenAI-compatible API rollout has no in-process tensor parallel; mesh must be (world_size, 1).
+        rollout_name = self.config.rollout.get("name")
+        if rollout_name == "openai_api":
+            old_tp = int(self.config.rollout.get("tensor_model_parallel_size", 1))
+            if old_tp != 1:
+                logger.warning(
+                    "rollout.name=openai_api ignores tensor parallelism; "
+                    "overriding tensor_model_parallel_size from %s to 1",
+                    old_tp,
+                )
+                with open_dict(self.config.rollout):
+                    self.config.rollout.tensor_model_parallel_size = 1
+
         # TODO(sgm): support FSDP hybrid shard for larger model
         infer_tp = self.config.rollout.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
-        rollout_name = self.config.rollout.name
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
@@ -496,6 +508,13 @@ class ActorRolloutRefWorker(Worker):
                 offload_param=self._is_offload_param,
             )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
+
+        elif rollout_name == "openai_api":
+            from verl.workers.rollout.openai_api_rollout import OpenAIApiRollout
+            from verl.workers.sharding_manager.base import BaseShardingManager
+
+            rollout = OpenAIApiRollout(config=self.config.rollout, tokenizer=self.tokenizer)
+            rollout_sharding_manager = BaseShardingManager()
 
         else:
             raise NotImplementedError(f"Rollout name: {self.config.rollout.name} is not supported")

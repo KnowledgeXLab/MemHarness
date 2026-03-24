@@ -389,8 +389,11 @@ class TrajectoryCollector:
             batch.non_tensor_batch['traj_uid'] = traj_uid
 
             batch = batch.union(batch_output)
-            
-            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
+
+            if "api_response_text" in batch.non_tensor_batch:
+                text_actions = list(batch.non_tensor_batch["api_response_text"])
+            else:
+                text_actions = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
             
             next_obs, rewards, dones, infos, env_step_mask = envs.step_with_memory(
                 text_actions,

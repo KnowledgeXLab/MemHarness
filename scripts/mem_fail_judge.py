@@ -2,11 +2,12 @@
 """
 对 ``_dump_validation_trajectories_jsonl`` 产出的 JSONL 轨迹调用 LLM，做失败归因分类（预实验）。
 
-标签：
-  - query_failure: 检索意图/查询不当，未召回到真正相关记忆（或应检索而未检索到）。
-  - experience_failure: 召回记忆表面相关，但依赖的环境条件与当前不一致，经验本身不适用。
-  - usage_failure: 记忆并非完全无效，但以「绑定旧状态」的固化形式注入，agent 难以转化为有效行动。
-  - non_memory_failure: 失败主要不由 memory 机制解释（指令理解、格式、探索噪声、环境偶然等）。
+标签（**多标签**；共 **3** 类 + 可与多类并存）：
+  - query_failure: 检索/查询不当，未召回到应召回的记忆或召回了明显无关/有害条目。
+  - adaptation_failure: **记忆使用/情境侧**问题：注入内容所依赖的前提与当前情境不符、和/或仍以**绑定旧状态**的固化形式出现，agent **难以转化为当前有效行动**。
+  - non_memory_failure: 指令/规划/动作格式/探索等非记忆因素**显著**促成失败（可与 query/adaptation 并存）。
+
+模型必须只输出上述三类的 ``labels``（字符串数组，可多选）。汇总为 **multihot** 与 **常见组合**。
 
 默认只处理 **失败** 轨迹（``episode_reward < --reward_threshold``）。加 ``--include_success`` 可连成功轨迹一起评。
 可用 ``--only_with_memory`` 只分析 **memory_retrieval_count > 0** 的轨迹（常与失败筛选联用）。
@@ -36,39 +37,36 @@ from openai import OpenAI
 from tqdm import tqdm
 
 
-VALID_LABELS = frozenset(
-    {"query_failure", "experience_failure", "usage_failure", "non_memory_failure"}
-)
+VALID_LABELS = frozenset({"query_failure", "adaptation_failure", "non_memory_failure"})
 
 
 SYSTEM_PROMPT = """You are an expert analyst for memory-augmented interactive agents (e.g., ALFWorld-style text environments).
 
-Your job is to read ONE episode: the **full text the policy saw at each step** and the **policy's text output**, then classify WHY the episode failed **with respect to memory usage**, using exactly one primary label from the allowed set.
+Your job is to read ONE episode: the **full text the policy saw at each step** and the **policy's text output**, then assign **one or more** failure-factor labels from the allowed set. Use **multi-label** whenever several factors clearly contributed (e.g., bad planning **and** misleading injected memory).
 
 Important:
 - Base your judgment **only on the episode text** below. Do not invent unseen environment facts.
 - The INPUT at each step may bundle: task/instruction, current observation, chat history, and **optional injected retrieved-memory passages** (wording depends on the system). Use those passages when reasoning about memory.
 - The episode text may be **truncated** (first + last turns only) to fit context; if so, a note appears at the top of the transcript. Still do your best, and weight evidence from **later visible steps** more heavily when judging the final failure.
-- If you cannot find any plausible memory-related issue in the text, prefer non_memory_failure.
-- Prefer non_memory_failure when the dominant issue is misunderstanding instructions, bad planning, wrong action syntax, or exploration noise — not memory content.
-- When **Authoring metadata for injected memories** is provided, it lists only **subgoal / preconditions / why_useful** from the memory bank (matched to injected ``memory k:`` lines). Use **preconditions** vs current observations to separate **experience_failure** from **usage_failure**, and retrieval quality for **query_failure**.
+- **labels** must be a **non-empty** JSON array of **distinct** strings from the allowed set: **query_failure**, **adaptation_failure**, **non_memory_failure**. Include **every** label for which you have **clear** supporting evidence (typically 1–2; at most 3).
+- **adaptation_failure** (memory **after retrieval**): use when injected memories **hurt or fail to help** because they are **misaligned with the current situation** and/or **not usable as-is**—including: (a) **preconditions** or implicit assumptions (use authoring metadata when provided) **clash** with current INPUT observations; (b) content is **too tied to a past episode wording** or **not operationalizable** into correct admissible actions. **Do not** split this into finer subtypes; one label covers both.
+- **query_failure**: use when retrieval/query clearly returned **irrelevant** passages relative to the step's goal/query, or when **obviously better** memories should have been retrieved (only if strongly inferable from the text).
+- **non_memory_failure**: use when **instruction misunderstanding, invalid action format, poor exploration, or planning** clearly hurt success. You **may** combine it with **query_failure** and/or **adaptation_failure** if **both** apply.
+- Do **not** add a label without evidence; do **not** output duplicate entries in **labels**.
 - Output valid JSON only, no markdown fences, no extra keys beyond the schema.
 """
 
 
-USER_PROMPT_TEMPLATE = """## Taxonomy (choose exactly one primary_label)
+USER_PROMPT_TEMPLATE = """## Taxonomy (multi-label: set ``labels`` to all that apply; **three** label types only)
 
 1) "query_failure"
-   Retrieval / query was mismatched so **relevant** experience was not retrieved, or clearly wrong items were retrieved, in a way that plausibly caused failure (infer from what appears in INPUT).
+   Retrieval / query mismatch: **relevant** memories were not retrieved, or **clearly wrong** items were retrieved, in a way that plausibly hurt the episode (infer from INPUT).
 
-2) "experience_failure"
-   Retrieved or injected content is **semantically plausible as advice** but its **preconditions** do not match the true current situation (state drift, wrong object/room/state). The content is misleading here.
+2) "adaptation_failure"
+   **After retrieval**, injected content is a poor fit for **current** decision-making: e.g. **preconditions** or implicit assumptions conflict with **current** observations (see authoring metadata when present), and/or the text stays **too bound to an old situation** / **not operationalizable** so the agent fails to derive correct actions. **Covers both** "wrong-for-this-world" and "right-ish but unusable as pasted"; do **not** use separate labels for those subcases.
 
-3) "usage_failure"
-   Injected content may be broadly relevant, but is **too tied to an old situation / not operationalizable** so the agent fails to turn it into correct actions (even if retrieval seemed OK).
-
-4) "non_memory_failure"
-   Failure is **primarily not** explained by memory (e.g., instruction misunderstanding, invalid action format, poor search). Memory may be absent or irrelevant in the text.
+3) "non_memory_failure"
+   **Non-memory** factors (instruction, format, exploration, planning) **clearly** contributed. May co-occur with **query_failure** and/or **adaptation_failure**.
 
 ## How to read the episode
 
@@ -92,10 +90,10 @@ The following blocks are **not** shown to the agent at runtime; they are **offli
 
 Return a JSON object with EXACTLY these keys:
 {{
-  "primary_label": "<one of: query_failure | experience_failure | usage_failure | non_memory_failure>",
+  "labels": ["<one or more distinct strings from: query_failure, adaptation_failure, non_memory_failure>"],
   "confidence": <float in [0,1]>,
-  "short_rationale": "<2-5 sentences, English or Chinese ok>",
-  "key_evidence": "<short quote or paraphrase from the episode text that supports the label>",
+  "short_rationale": "<2-6 sentences, English or Chinese ok; explain multiple labels if more than one>",
+  "key_evidence": "<short quote or paraphrase from the episode text>",
   "secondary_notes": "<optional extra caveats; empty string if none>"
 }}
 """
@@ -105,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="LLM judge for memory-related failure taxonomy on validation trajectory JSONL."
     )
-    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/train_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
+    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/val_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
     p.add_argument(
         "--output",
         "-o",
@@ -123,7 +121,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"OpenAI-compatible API base URL (else from secrets file, else {_DEFAULT_OPENAI_BASE_URL!r}).",
     )
-    p.add_argument("--model", default="gpt-5.1", help="Judge model name.")
+    p.add_argument("--model", default="gpt-5-mini", help="Judge model name.")
     p.add_argument(
         "--api_key",
         default=None,
@@ -260,6 +258,37 @@ def extract_json_object(text: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
+
+
+def parse_and_validate_judge_labels(judged: dict[str, Any]) -> tuple[list[str] | None, str | None]:
+    """Require non-empty ``labels``: only ``query_failure`` | ``adaptation_failure`` | ``non_memory_failure``."""
+    labs = judged.get("labels")
+    if labs is None:
+        return None, "missing required `labels` array"
+    if not isinstance(labs, list):
+        return None, f"`labels` must be a list, got {type(labs).__name__}"
+    out: list[str] = []
+    seen: set[str] = set()
+    for i, x in enumerate(labs):
+        if not isinstance(x, str):
+            return None, f"labels[{i}] must be string, got {type(x).__name__}"
+        s = x.strip()
+        if s not in VALID_LABELS:
+            return None, f"invalid label in labels[{i}]: {x!r} (must be one of {sorted(VALID_LABELS)})"
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    if not out:
+        return None, "`labels` is empty (or only duplicates)"
+    return out, None
+
+
+def extract_labels_for_summary(raw: dict[str, Any] | None) -> list[str]:
+    if not isinstance(raw, dict):
+        return []
+    labs, err = parse_and_validate_judge_labels(raw)
+    return labs if not err and labs else []
 
 
 def normalize_memory_text_key(text: str) -> str:
@@ -645,7 +674,7 @@ def default_output_path(input_path: str, args: argparse.Namespace) -> Path:
     if args.include_success:
         out_path = out_path.replace(".jsonl", "_trajs.jsonl")
     else:
-        out_path = out_path.replace(".jsonl", "_fail_trajs.jsonl")
+        out_path = out_path.replace(".jsonl", "_fail_trajs-1.jsonl")
 
     return Path(out_path)
 
@@ -707,30 +736,42 @@ def process_one(
             temperature=args.temperature,
             max_tokens=args.max_tokens,
         )
-        label = judged.get("primary_label")
-        if isinstance(label, str) and label.strip() not in VALID_LABELS:
-            result["error"] = f"invalid primary_label from model: {label!r}"
+        labels_norm, label_err = parse_and_validate_judge_labels(judged)
+        if label_err:
+            result["error"] = label_err
             result["judge_raw"] = judged
         else:
-            result["judge_raw"] = judged
+            judged_out = {**judged, "labels": labels_norm}
+            result["judge_labels"] = labels_norm
+            result["judge_raw"] = judged_out
     except Exception as e:
         result["error"] = repr(e)
     return result
 
 
 def summarize_counts(results: list[dict[str, Any]]) -> dict[str, Any]:
-    labels: list[str] = []
+    """Multihot: each trajectory can contribute to multiple label counts."""
+    inclusion: Counter[str] = Counter()
+    pattern: Counter[str] = Counter()
+    n_err = 0
     for r in results:
         if r.get("error"):
-            labels.append("__error__")
+            n_err += 1
             continue
         raw = r.get("judge_raw")
-        if isinstance(raw, dict) and raw.get("primary_label"):
-            labels.append(str(raw["primary_label"]))
-        else:
-            labels.append("__error__")
-    cnt = Counter(labels)
-    return {"primary_label_counts": dict(cnt), "total": len(results)}
+        labs = extract_labels_for_summary(raw if isinstance(raw, dict) else None)
+        if not labs:
+            n_err += 1
+            continue
+        for lb in labs:
+            inclusion[lb] += 1
+        pattern["+".join(sorted(labs))] += 1
+    return {
+        "total": len(results),
+        "error_count": n_err,
+        "label_inclusion_counts": dict(inclusion),
+        "label_pattern_top": dict(pattern.most_common(40)),
+    }
 
 
 def main() -> None:

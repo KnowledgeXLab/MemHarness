@@ -955,7 +955,11 @@ class RayPPOTrainer:
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in prompt_ids]
             sample_inputs.extend(input_texts)
             output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            if "api_response_text" in test_output_gen_batch.non_tensor_batch:
+                api_out = test_output_gen_batch.non_tensor_batch["api_response_text"]
+                output_texts = [str(api_out[i]) for i in range(len(api_out))]
+            else:
+                output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
             # test_batch = test_batch.union(test_output_gen_batch)

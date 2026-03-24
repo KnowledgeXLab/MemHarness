@@ -149,6 +149,16 @@ actor_rollout_ref:
       temperature: 0
       n: 1
       do_sample: False # default eager for validation
+    # Closed-model eval: set rollout.name to openai_api and tensor_model_parallel_size to 1.
+    openai_api:
+      base_url: http://35.220.164.252:3888/v1/
+      api_key: ${oc.env:OPENAI_API_KEY,}
+      model: gpt-4.1-nano
+      max_concurrent: 8
+      timeout_sec: 120
+      max_retries: 2
+      retry_backoff_sec: 1.0
+      extra_headers: { }
     multi_turn:
       enable: False  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
       max_turns: null  # null for no limit (default max_length // 3)

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# 需用 bash 运行（含进程替换 `>(tee ...)`）；推荐: bash eval_alfworld-preexp.sh
 set -x
 set -euo pipefail
-ENGINE=${1:-vllm}
+ENGINE="openai_api" # vllm | openai_api, ENGINE=openai_api，需 export OPENAI_API_KEY
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE=offline
 
-GPU_NUM=2
+GPU_NUM=1
 # Ray Object Store（Plasma）内存上限，单位 GiB；传给 ray_init.object_store_memory（字节）
 RAY_OBJECT_STORE_GIB=160
 RAY_OBJECT_STORE_BYTES=$((RAY_OBJECT_STORE_GIB * 1024 * 1024 * 1024))
@@ -21,8 +20,8 @@ TEST_FILE="${DATA_ROOT}/text/test.parquet"
 #   EVAL_ON_SPLIT=test（默认） -> test.parquet；val 环境为 eval 划分
 #   EVAL_ON_SPLIT=train        -> train.parquet 全量；须 VALIDATE_ON_TRAIN_SPLIT=True
 # 示例：EVAL_ON_SPLIT=train bash examples/grpo_trainer/eval_alfworld-preexp.sh
-EVAL_ON_SPLIT="train"  # train | test
-VALIDATE_ON_TRAIN_SPLIT=True
+EVAL_ON_SPLIT="test"  # train | test
+VALIDATE_ON_TRAIN_SPLIT=False
 if [ "${EVAL_ON_SPLIT}" = "train" ]; then
   VAL_FILE="${TRAIN_FILE}"
   VALIDATION_TRAJ_SUBDIR="train_traj"
@@ -43,9 +42,10 @@ EMBEDDING_API_URL="http://10.140.37.35:8081/v1"
 MEMORY_REBUILD_SOURCE_PATH="/home/wurong/workspace/MemAdaptor/data/AgentGym/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 
 
-EXPERIMENT_NAME="Qwen2.5-1.5B-Instruct"
+# EXPERIMENT_NAME="Qwen2.5-1.5B-Instruct"
+EXPERIMENT_NAME="gpt-4.1-nano"
 EXPERIMENTS_ROOT="data/exp_results/MemAdaptor/pre_exp"
-MODEL_PATH="/nvme/public_models/Qwen2.5-1.5B-Instruct"
+MODEL_PATH="/nvme/public_models/Qwen2.5-0.5B-Instruct"
 
 if [ "${MEMORY_ENABLED}" == "True" ]; then
     EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
@@ -63,12 +63,13 @@ LOG_FILE="${EXP_DIR}/eval_alfworld-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
-train_data_size=2
+train_data_size=1
 # 验证并行环境数 = AlfWorld val 并行 worker 数。若样本数不能整除 batch，须设 VAL_DROP_LAST=true（会丢掉最后不足一批，最多 val_batch_size-1 条）
 # 例：3553 训练集 + batch 8 -> 少评 1 条；或改用能整除的 batch（如 11/17/19）
 val_batch_size=128
 VAL_DROP_LAST=True
 group_size=1
+max_concurrent=128 # api_rollout最大并发数
 
 # 默认：从 AlfredTWEnv 推断 train/eval 全量可玩 game 数并生成占位 parquet（与轨迹条数一致）
 # 首次或需改条数：PREPARE_OVERWRITE=1 bash examples/grpo_trainer/eval_alfworld-preexp.sh
@@ -117,6 +118,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+    actor_rollout_ref.rollout.openai_api.max_concurrent=${max_concurrent} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
