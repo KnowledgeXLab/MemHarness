@@ -11,16 +11,6 @@
 默认只处理 **失败** 轨迹（``episode_reward < --reward_threshold``）。加 ``--include_success`` 可连成功轨迹一起评。
 可用 ``--only_with_memory`` 只分析 **memory_retrieval_count > 0** 的轨迹（常与失败筛选联用）。
 
-用法示例::
-
-    export OPENAI_API_KEY=...
-    python scripts/mem_fail_judge.py --input path/to/0.jsonl --output out/mem_judge.jsonl
-
-    # 仅失败且 memory_retrieval_count > 0
-    python scripts/mem_fail_judge.py -i val.jsonl -o out.jsonl --only_with_memory
-
-    # 先看 prompt 不调用 API
-    python scripts/mem_fail_judge.py -i val.jsonl --dry_run --max_trajectories 2
 """
 
 from __future__ import annotations
@@ -37,6 +27,9 @@ from typing import Any
 
 # 注入格式与 ``agent_system/memory/memory_manager.py`` 的 ``_format_memory_prompt`` 一致：``memory 1:`` …（通常 top_k=3）
 _MEMORY_LINE_RE = re.compile(r"^memory\s+(\d+)\s*:\s*(.*)$", re.MULTILINE)
+
+_DEFAULT_OPENAI_BASE_URL = "http://35.220.164.252:3888/v1/"
+_DEFAULT_SECRETS_PATH = Path(__file__).resolve().parent / "llm_secrets.json"
 
 import httpx
 from openai import OpenAI
@@ -119,9 +112,23 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Output .jsonl path (default: <input>.mem_judge.jsonl next to input).",
     )
-    p.add_argument("--base_url", default="http://35.220.164.252:3888/v1/", help="OpenAI-compatible API base URL.")
+    p.add_argument(
+        "--secrets",
+        type=str,
+        default=str(_DEFAULT_SECRETS_PATH),
+        help="JSON file with optional api_key and base_url (default: scripts/llm_secrets.json).",
+    )
+    p.add_argument(
+        "--base_url",
+        default=None,
+        help=f"OpenAI-compatible API base URL (else from secrets file, else {_DEFAULT_OPENAI_BASE_URL!r}).",
+    )
     p.add_argument("--model", default="gpt-5.1", help="Judge model name.")
-    p.add_argument("--api_key", default="sk-LCNRSkN5fnAsRTJ8a5VUvyQznlWR2LJEpVCAoRhhodxx8Ls2", help="OpenAI API key.")
+    p.add_argument(
+        "--api_key",
+        default=None,
+        help="OpenAI API key (else from secrets file or OPENAI_API_KEY).",
+    )
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--max_tokens", type=int, default=2048)
     p.add_argument("--timeout", type=int, default=120)
@@ -187,6 +194,23 @@ def parse_args() -> argparse.Namespace:
         help="If set, fall back to substring match (normalized) when exact memory_text key misses.",
     )
     return p.parse_args()
+
+
+def _load_secrets_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_openai_credentials(args: argparse.Namespace) -> None:
+    """Merge --api_key / --base_url with secrets JSON and env (OPENAI_API_KEY)."""
+    sec_path = Path(args.secrets).expanduser().resolve()
+    data = _load_secrets_json(sec_path)
+    api_key = args.api_key or data.get("api_key") or os.environ.get("OPENAI_API_KEY")
+    base_url = args.base_url or data.get("base_url") or _DEFAULT_OPENAI_BASE_URL
+    args.api_key = api_key
+    args.base_url = base_url
 
 
 def _iter_jsonl(path: str) -> list[dict[str, Any]]:
@@ -711,6 +735,7 @@ def summarize_counts(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    resolve_openai_credentials(args)
     attach_memory_text_index(args)
     rows = _iter_jsonl(args.input)
     selected = select_rows(rows, args)
@@ -732,6 +757,12 @@ def main() -> None:
         print(one["user_prompt"][:8000])
         print("\n... [dry_run: truncated print] ...\n")
         return
+
+    if not args.api_key:
+        sys.exit(
+            "Missing API key: add api_key to scripts/llm_secrets.json, "
+            "or pass --api_key, or set OPENAI_API_KEY."
+        )
 
     client = build_client(args.base_url, args.api_key, args.timeout)
 
