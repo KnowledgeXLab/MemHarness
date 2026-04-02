@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="LLM judge for memory-related failure taxonomy on validation trajectory JSONL."
     )
-    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/val_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
+    p.add_argument("--input", "-i", default="data/exp_results/MemAdaptor/pre_exp/alfworld/gpt-4.1-nano-with_agentic_memory-retrieve_memory_text/train_traj/0.jsonl", help="Path to validation trajectories .jsonl (one JSON per line).")
     p.add_argument(
         "--output",
         "-o",

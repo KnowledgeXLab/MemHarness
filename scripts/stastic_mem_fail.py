@@ -13,11 +13,7 @@ from mem_fail_judge import summarize_counts  # noqa: E402
 
 
 def main() -> None:
-    data_path = (
-        "data/exp_results/MemAdaptor/pre_exp/alfworld/"
-        "Qwen2.5-1.5B-Instruct-with_agentic_memory-retrieve_memory_text/train_traj/"
-        "0.mem_judge-only-mem_fail_trajs.jsonl"
-    )
+    data_path = "data/exp_results/MemAdaptor/pre_exp/alfworld/gpt-4.1-nano-with_agentic_memory-retrieve_memory_text/train_traj/0.mem_judge-only-mem_fail_trajs-1.jsonl"
     data: list[dict[str, Any]] = [json.loads(line) for line in open(data_path, encoding="utf-8") if line.strip()]
     summary = summarize_counts(data)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

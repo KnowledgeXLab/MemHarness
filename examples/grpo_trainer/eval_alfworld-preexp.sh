@@ -20,8 +20,8 @@ TEST_FILE="${DATA_ROOT}/text/test.parquet"
 #   EVAL_ON_SPLIT=test（默认） -> test.parquet；val 环境为 eval 划分
 #   EVAL_ON_SPLIT=train        -> train.parquet 全量；须 VALIDATE_ON_TRAIN_SPLIT=True
 # 示例：EVAL_ON_SPLIT=train bash examples/grpo_trainer/eval_alfworld-preexp.sh
-EVAL_ON_SPLIT="test"  # train | test
-VALIDATE_ON_TRAIN_SPLIT=False
+EVAL_ON_SPLIT="train"  # train | test
+VALIDATE_ON_TRAIN_SPLIT=True
 if [ "${EVAL_ON_SPLIT}" = "train" ]; then
   VAL_FILE="${TRAIN_FILE}"
   VALIDATION_TRAJ_SUBDIR="train_traj"
@@ -69,7 +69,7 @@ train_data_size=1
 val_batch_size=128
 VAL_DROP_LAST=True
 group_size=1
-max_concurrent=128 # api_rollout最大并发数
+max_concurrent=32 # api_rollout最大并发数
 
 # 默认：从 AlfredTWEnv 推断 train/eval 全量可玩 game 数并生成占位 parquet（与轨迹条数一致）
 # 首次或需改条数：PREPARE_OVERWRITE=1 bash examples/grpo_trainer/eval_alfworld-preexp.sh
@@ -127,7 +127,7 @@ python3 -m verl.trainer.main_ppo \
     env.env_name=alfworld/AlfredTWEnv \
     env.alfworld.validate_on_train_split=${VALIDATE_ON_TRAIN_SPLIT} \
     env.seed=0 \
-    env.max_steps=50 \
+    env.max_steps=30 \
     env.memory.enabled=${MEMORY_ENABLED} \
     env.memory.store_dir=${MEMORY_STORE_DIR} \
     env.memory.rebuild_source_path=${MEMORY_REBUILD_SOURCE_PATH} \
