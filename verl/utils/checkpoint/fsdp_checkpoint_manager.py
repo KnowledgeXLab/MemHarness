@@ -51,8 +51,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
     def __init__(
         self,
         model: FSDP,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        optimizer: Optional[torch.optim.Optimizer],
+        lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
         processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
         checkpoint_contents: Optional[list] = None,
         **kwargs,
@@ -63,7 +63,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             assert "tokenizer" in kwargs, "tokenizer or processor must be provided"
             warnings.warn("`tokenizer` is deprecated. use `processing_class` instead.", DeprecationWarning, stacklevel=2)
             processing_class = kwargs.pop("tokenizer")
-        assert "model" in checkpoint_contents and "optimizer" in checkpoint_contents and "extra" in checkpoint_contents, f"FSDPCheckpointManager must include ['model', 'optimizer', 'extra'], got {checkpoint_contents}"
+        if optimizer is None:
+            checkpoint_contents = [c for c in checkpoint_contents if c != "optimizer"]
+        assert "model" in checkpoint_contents and "extra" in checkpoint_contents, (
+            f"FSDPCheckpointManager must include 'model' and 'extra', got {checkpoint_contents}"
+        )
+        if optimizer is not None and "optimizer" not in checkpoint_contents:
+            raise ValueError("'optimizer' must appear in checkpoint_contents when optimizer is provided")
 
         super().__init__(
             model,
@@ -93,19 +99,20 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
         remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
         remote_extra_state_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
-        print(f"[rank-{self.rank}]: Loading from {remote_model_path} and {remote_optim_path} and {remote_extra_state_path}")
+        print(f"[rank-{self.rank}]: Loading from {remote_model_path} and {remote_extra_state_path}" + (f" and {remote_optim_path}" if self.optimizer is not None else ""))
         local_model_path = copy_to_local(remote_model_path)
-        local_optim_path = copy_to_local(remote_optim_path)
         local_extra_state_path = copy_to_local(remote_extra_state_path)
+        local_optim_path = copy_to_local(remote_optim_path) if self.optimizer is not None else None
 
         model_state_dict = torch.load(local_model_path, weights_only=False)
-        optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
         extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
+        optimizer_state_dict = torch.load(local_optim_path, weights_only=False) if local_optim_path is not None else None
 
         if del_local_after_load:
             try:
                 os.remove(local_model_path) if is_non_local(local_model_path) else None
-                os.remove(local_optim_path) if is_non_local(local_optim_path) else None
+                if local_optim_path is not None:
+                    os.remove(local_optim_path) if is_non_local(local_optim_path) else None
                 os.remove(local_extra_state_path) if is_non_local(local_extra_state_path) else None
             except Exception as e:
                 print(f"[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored")
@@ -116,7 +123,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
         with get_fsdp_state_ctx(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
             self.model.load_state_dict(model_state_dict)
-            if self.optimizer is not None:
+            if (
+                self.optimizer is not None
+                and optimizer_state_dict is not None
+                and isinstance(optimizer_state_dict, dict)
+            ):
                 self.optimizer.load_state_dict(optimizer_state_dict)
         # recover random state
         if "rng" in extra_state_dict:

@@ -538,8 +538,9 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
+            actor_trainable = self._is_actor and self.config.actor.get("trainable", True)
             if self._is_actor:
-                optim_config = self.config.actor.optim
+                optim_config = self.config.actor.optim if actor_trainable else None
                 fsdp_config = self.config.actor.fsdp_config
             else:
                 optim_config = None
@@ -576,6 +577,11 @@ class ActorRolloutRefWorker(Worker):
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
+
+            if self._is_actor and not actor_trainable:
+                for p in self.actor_module_fsdp.parameters():
+                    p.requires_grad_(False)
+
         # load from checkpoint
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
@@ -608,12 +614,15 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
+            ckpt_contents = list(self.config.actor.checkpoint.contents)
+            if not self.config.actor.get("trainable", True):
+                ckpt_contents = [c for c in ckpt_contents if c != "optimizer"]
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
                 optimizer=self.actor.actor_optimizer,
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=self.config.actor.checkpoint.contents,
+                checkpoint_contents=ckpt_contents,
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -622,6 +631,8 @@ class ActorRolloutRefWorker(Worker):
         data = data.to(get_torch_device().current_device())
 
         assert self._is_actor
+        if self.actor_optimizer is None:
+            return DataProto(meta_info={"metrics": {}})
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:

@@ -19,15 +19,29 @@ from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
+from typing import Optional
+
 from transformers import PreTrainedTokenizer
 import uuid
 from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict, torch_to_numpy, filter_group_data
 from agent_system.environments import EnvironmentManagerBase
 from typing import List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+from agent_system.memory.mem_adaptor_rollout import maybe_apply_memory_adaptor
+from agent_system.memory.mem_adaptor_training import (
+    prune_mem_adaptor_training_samples_after_group_filter,
+    train_memory_adaptor_enabled,
+)
+from verl.protocol import write_mem_adaptor_step_non_tensor_batch
 
 class TrajectoryCollector:
-    def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
+    def __init__(
+        self,
+        config,
+        tokenizer: PreTrainedTokenizer,
+        processor=None,
+        adaptor_tokenizer: Optional[PreTrainedTokenizer] = None,
+    ):
         """
         Initialize the TrajectoryProcessor class.
         
@@ -35,10 +49,14 @@ class TrajectoryCollector:
             config: Configuration object containing data processing settings
             tokenizer (PreTrainedTokenizer): Tokenizer for text encoding and decoding
             processor: Image processor for multimodal inputs
+            adaptor_tokenizer: Tokenizer for Memory Adaptor prompts when using a dedicated adaptor checkpoint
+                (defaults to ``tokenizer``).
         """
         self.config = config
         self.tokenizer = tokenizer
         self.processor = processor
+        self.adaptor_tokenizer = adaptor_tokenizer if adaptor_tokenizer is not None else tokenizer
+        self.mem_adaptor_training_samples: list = []
 
     def preprocess_single_sample(
         self,
@@ -294,6 +312,8 @@ class TrajectoryCollector:
             gen_batch: DataProto, 
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
+            adaptor_rollout_wg=None,
+            trainer_global_step=None,
             ) -> DataProto:
         """
         Collects trajectories through parallel agent-environment agent_loop.
@@ -477,7 +497,29 @@ class TrajectoryCollector:
             # Update done states
             is_done = np.logical_or(is_done, dones)
             is_done = np.logical_or(is_done, episode_lengths >= max_env_steps)
-                
+
+            adaptor_train_buf = None
+            if (
+                train_memory_adaptor_enabled(self.config)
+                and adaptor_rollout_wg is not None
+            ):
+                adaptor_train_buf = self.mem_adaptor_training_samples
+
+            maybe_apply_memory_adaptor(
+                config=self.config,
+                tokenizer=self.adaptor_tokenizer,
+                next_obs=next_obs,
+                infos=infos,
+                active_masks=active_masks,
+                generate_wg=actor_rollout_wg,
+                adaptor_rollout_wg=adaptor_rollout_wg,
+                trainer_global_step=trainer_global_step,
+                episode_lengths=episode_lengths,
+                adaptor_training_buffer=adaptor_train_buf,
+                traj_uid=traj_uid,
+            )
+            write_mem_adaptor_step_non_tensor_batch(batch, infos, batch_size)
+
             # Update observations for next step
             obs = next_obs
             current_infos = infos
@@ -493,6 +535,9 @@ class TrajectoryCollector:
                     episode_lengths=episode_lengths,
                     )
         envs.maybe_write_rollout_memories(
+            config=self.config,
+            tokenizer=self.tokenizer,
+            actor_rollout_wg=actor_rollout_wg,
             total_batch_list=total_batch_list,
             total_infos=total_infos,
             episode_rewards=episode_rewards,
@@ -500,7 +545,7 @@ class TrajectoryCollector:
             success=success,
             traj_uid=traj_uid,
         )
-        
+
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
     
     def dynamic_multi_turn_loop(
@@ -508,6 +553,8 @@ class TrajectoryCollector:
             gen_batch: DataProto, 
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
+            adaptor_rollout_wg=None,
+            trainer_global_step=None,
             ) -> DataProto:
         """
         Conduct dynamic rollouts until a target batch size is met. 
@@ -543,10 +590,13 @@ class TrajectoryCollector:
                 print(f"valid num={len(total_batch_list)} < target num={self.config.data.train_batch_size * self.config.env.rollout.n}. Keep generating... ({try_count}/{max_try_count})")
             try_count += 1
 
+            mem_ad_buf_start = len(self.mem_adaptor_training_samples)
             batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles = self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                adaptor_rollout_wg=adaptor_rollout_wg,
+                trainer_global_step=trainer_global_step,
             )
             batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles = filter_group_data(batch_list=batch_list, 
                                                                                                 episode_rewards=episode_rewards, 
@@ -559,6 +609,10 @@ class TrajectoryCollector:
                                                                                                 config=self.config,
                                                                                                 last_try=(try_count == max_try_count),
                                                                                                 )
+            if train_memory_adaptor_enabled(self.config) and adaptor_rollout_wg is not None:
+                prune_mem_adaptor_training_samples_after_group_filter(
+                    self.mem_adaptor_training_samples, mem_ad_buf_start, traj_uid
+                )
             
             total_batch_list += batch_list
             total_episode_rewards.append(episode_rewards)
@@ -585,6 +639,8 @@ class TrajectoryCollector:
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
             is_train: bool = True,
+            adaptor_rollout_wg=None,
+            trainer_global_step=None,
             ) -> DataProto:
         """
         Select and run the appropriate rollout loop (dynamic or vanilla).
@@ -598,6 +654,7 @@ class TrajectoryCollector:
         Returns:
             DataProto: Final collected trajectory data with metadata.
         """
+        self.mem_adaptor_training_samples.clear()
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
             
@@ -609,6 +666,8 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                adaptor_rollout_wg=adaptor_rollout_wg,
+                trainer_global_step=trainer_global_step,
             )
         else:
             # Vanilla Sampling   
@@ -617,6 +676,8 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                adaptor_rollout_wg=adaptor_rollout_wg,
+                trainer_global_step=trainer_global_step,
             )
         assert len(total_batch_list) == len(total_episode_rewards)
         assert len(total_batch_list) == len(total_episode_lengths)

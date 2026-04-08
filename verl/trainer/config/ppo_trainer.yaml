@@ -46,6 +46,8 @@ actor_rollout_ref:
     use_fused_kernels: False
     trust_remote_code: False
   actor:
+    # If false, RayPPOTrainer skips update_actor (rollout / generate_sequences unchanged).
+    trainable: true
     strategy: fsdp  # [fsdp, fsdp2], This is for backward-compatibility
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
@@ -291,6 +293,10 @@ trainer:
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
+  # Fine-grained resume: e.g. only restore mem_adaptor/ while keeping Reasoning weights from HF init.
+  resume_load_actor: true
+  resume_load_mem_adaptor: true
+  resume_load_critic: true
   val_before_train: True
   val_only: False
   test_freq: -1
@@ -326,6 +332,34 @@ env:
     write_back: False   # Whether to write rollout trajectories back into memory online.
     only_store_positive_reward: True   # When write_back is enabled, only keep positive-reward samples.
     max_pairs_per_episode: 8   # When write_back is enabled, max number of memory pairs extracted from one episode.
+    # Whole-trajectory summarization then VDB insert (requires write_back=true, mode=self|teacher).
+    experience_summarizer:
+      mode: none   # none | self (actor_rollout_wg.generate_sequences) | teacher (OpenAI-compatible HTTP)
+      system_prompt: >-
+        You distill a finished task trajectory into one short, reusable principle or lesson
+        (what worked, what to avoid, or how to decide). Output plain text only, no bullet labels unless needed.
+      user_template: |-
+        Trajectory (context and model action per step):
+        {trajectory_text}
+
+        Episode return: {episode_reward}. Success flag: {success}. Trajectory id: {traj_uid}.
+        Write the single principle paragraph only.
+      max_trajectory_chars: 32000
+      max_new_tokens: 512
+      temperature: 0.3
+      top_p: 1.0
+      do_sample: false
+      openai_api:
+        base_url: https://api.openai.com/v1
+        api_key: ${oc.env:OPENAI_API_KEY,}
+        model: gpt-4o-mini
+        max_tokens: 512
+        temperature: 0.3
+        timeout_sec: 120.0
+        max_concurrent: 8
+        max_retries: 2
+        retry_backoff_sec: 1.0
+        extra_headers: {}
     count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
@@ -375,3 +409,54 @@ env:
   webshop:
     use_small: True
     human_goals: False
+
+# Memory Adaptor (inference hook): batched generate via WorkerGroup; see agent_system/memory/mem_adaptor_rollout.py
+# Recommended with env.memory.retrieval_mode=agentic so infos carry memory_event (retrieved list).
+# Dedicated WG: set enable=true, use_actor_rollout_wg=false, model.path, and extra GPUs via resource_pool_gpus_per_node.
+mem_adaptor:
+  enable: false
+  schedule: on_memory_only   # on_memory_only | every_step
+  use_actor_rollout_wg: true   # false -> second Role on mem_adaptor_pool (see verl/trainer/main_ppo.py)
+  retrieval_top_k: 1   # take top-k retrieved (S_old,P_old) hits; one batched generate; merges non-EMPTY outputs
+  multi_hit_joiner: "\n\n"   # between accepted adapted principles when retrieval_top_k > 1
+  # Optimize Memory Adaptor with GRPO (episode return on adaptor completions). Requires use_actor_rollout_wg=false,
+  # a local adaptor rollout (hf/vllm), and algorithm.adv_estimator=grpo. Reasoning: trainable=false (frozen) or true (joint).
+  train_memory_adaptor: false
+  # If train_memory_adaptor is omitted, ``trainable`` is used as fallback (legacy).
+  trainable: false
+  model:
+    path: null   # HF checkpoint for adaptor when use_actor_rollout_wg=false (required then)
+    use_shm: false
+  # Per-node GPU counts for mem_adaptor_pool (length must match trainer.nnodes). Default [1,...,1]. Sum with global pool must fit cluster.
+  resource_pool_gpus_per_node: null
+  # Fine-grained adaptor schedule (optional). Global step = trainer global_step during rollout; env step = post-step episode length for that env.
+  train_global_step_start: null   # inclusive; null = no lower bound
+  train_global_step_end: null     # exclusive upper bound; null = unbounded
+  env_step_start: null            # inclusive 1-based env step; null defaults to 1
+  env_step_end: null              # exclusive; null = unbounded
+  env_step_every_n: 1             # run adaptor only when (env_step - env_step_start) % n == 0
+  system_prompt: >-
+    You adapt a retrieved memory principle to the CURRENT situation, or output exactly <EMPTY> if the principle does not apply.
+  user_message_template: |-
+    Current situation (state):
+    {s_curr}
+
+    Retrieved historical state:
+    {s_old}
+
+    Historical principle (memory):
+    {p_old}
+
+    Output ONLY the adapted principle text, or exactly <EMPTY>.
+  empty_output_markers:
+    - "<EMPTY>"
+    - "<empty>"
+  no_experience_message: "(No validated memory principle applies; rely on observation and reasoning.)"
+  adapted_injection_prefix: "Adapted memory principle:\n"
+  placeholder_old_state: "(none)"
+  placeholder_old_principle: "(none)"
+  max_new_tokens: 256
+  max_prompt_chars: 12000
+  do_sample: true
+  temperature: 0.7
+  top_p: 1.0

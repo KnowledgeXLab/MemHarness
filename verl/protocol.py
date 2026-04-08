@@ -38,10 +38,41 @@ from verl.utils.device import get_torch_device
 from verl.utils.py_functional import union_two_dict
 from verl.utils.torch_functional import allgather_dict_tensors
 
-__all__ = ["DataProto", "union_tensor_dict"]
+__all__ = [
+    "DataProto",
+    "union_tensor_dict",
+    "MEMORY_ADAPTOR_INFOS_KEYS",
+    "MEMORY_ADAPTOR_STEP_NON_TENSOR_KEYS",
+    "write_mem_adaptor_step_non_tensor_batch",
+]
 
 with contextlib.suppress(Exception):
     tensordict.set_lazy_legacy(False).set()
+
+# MemAdaptor (GRPO rollout path): keys written on ``infos[i]`` by
+# ``maybe_apply_memory_adaptor``; supersets keys copied each env step into ``batch.non_tensor_batch``.
+MEMORY_ADAPTOR_INFOS_KEYS = frozenset(
+    {"mem_adaptor_applied", "mem_adaptor_reject", "mem_adaptor_raw_output", "mem_adaptor_raw_outputs"}
+)
+MEMORY_ADAPTOR_STEP_NON_TENSOR_KEYS = frozenset(
+    {"mem_adaptor_applied", "mem_adaptor_reject", "mem_adaptor_raw_output"}
+)
+
+
+def write_mem_adaptor_step_non_tensor_batch(batch, infos: list, batch_size: int) -> None:
+    """Copy MemAdaptor diagnostics from env ``infos`` into ``batch.non_tensor_batch`` (shape ``batch_size``)."""
+    batch.non_tensor_batch["mem_adaptor_applied"] = np.array(
+        [bool(infos[i].get("mem_adaptor_applied", False)) for i in range(batch_size)],
+        dtype=bool,
+    )
+    batch.non_tensor_batch["mem_adaptor_reject"] = np.array(
+        [bool(infos[i].get("mem_adaptor_reject", False)) for i in range(batch_size)],
+        dtype=bool,
+    )
+    batch.non_tensor_batch["mem_adaptor_raw_output"] = np.array(
+        [infos[i].get("mem_adaptor_raw_output", "") for i in range(batch_size)],
+        dtype=object,
+    )
 
 
 class _DataProtoConfigMeta(type):

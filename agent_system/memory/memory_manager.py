@@ -144,10 +144,42 @@ class MemoryManager:
         _, event = self.build_memory_message_and_event(state_text=state_text, query_text=query_text)
         return event
 
-    ## TODO: Implement this method
     def maybe_write_rollout_memories(self, **kwargs) -> list:
-        # Reserved hook for future online write-back. Pre-experiment does not use it yet.
-        del kwargs
+        """
+        After parallel rollouts: optionally summarize trajectories and insert into the memory store.
+
+        Expected kwargs from ``TrajectoryCollector`` / env manager:
+        ``config``, ``tokenizer``, ``actor_rollout_wg`` (for mode=self),
+        ``total_batch_list``, ``total_infos``, ``episode_rewards``, ``episode_lengths``,
+        ``success``, ``traj_uid``.
+
+        Heavy lifting lives in ``agent_system.memory.experience_summarizer`` to keep this file readable.
+        """
+        from agent_system.memory.experience_summarizer import maybe_summarize_and_write_experiences
+
+        config = kwargs.get("config")
+        tokenizer = kwargs.get("tokenizer")
+        total_batch_list = kwargs.get("total_batch_list")
+        episode_rewards = kwargs.get("episode_rewards")
+        episode_lengths = kwargs.get("episode_lengths")
+        traj_uid = kwargs.get("traj_uid")
+        if config is None or tokenizer is None:
+            return []
+        if not total_batch_list or episode_rewards is None or episode_lengths is None or traj_uid is None:
+            return []
+
+        maybe_summarize_and_write_experiences(
+            config=config,
+            memory_manager=self,
+            tokenizer=tokenizer,
+            actor_rollout_wg=kwargs.get("actor_rollout_wg"),
+            total_batch_list=total_batch_list,
+            total_infos=kwargs.get("total_infos") or [],
+            episode_rewards=episode_rewards,
+            episode_lengths=episode_lengths,
+            success=kwargs.get("success") or {},
+            traj_uid=traj_uid,
+        )
         return []
 
     def close(self) -> None:

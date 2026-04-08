@@ -63,6 +63,11 @@ from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
+from agent_system.memory.mem_adaptor_training import (
+    build_memory_adaptor_grpo_batch,
+    prepare_adaptor_batch_for_rl,
+    train_memory_adaptor_enabled,
+)
 
 WorkerType = Type[Worker]
 
@@ -79,6 +84,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    MemAdaptorRollout = 7
 
 
 class AdvantageEstimator(str, Enum):
@@ -419,12 +425,20 @@ class RayPPOTrainer:
         self.envs = envs
         self.val_envs = val_envs
         self.traj_collector = traj_collector
+        # Set in init_workers when Role.MemAdaptorRollout is registered (mem_adaptor.use_actor_rollout_wg=false).
+        self.adaptor_rollout_wg = None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
             assert Role.ActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+
+        if Role.MemAdaptorRollout in role_worker_mapping:
+            assert (
+                resource_pool_manager.mapping[Role.MemAdaptorRollout]
+                != resource_pool_manager.mapping[Role.ActorRollout]
+            ), "Dedicated mem_adaptor rollout must use a resource_pool id other than the main ActorRollout pool."
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -945,7 +959,9 @@ class RayPPOTrainer:
                                                     actor_rollout_wg=self.actor_rollout_wg,
                                                     envs=self.val_envs,
                                                     is_train=False,
-                                                    )
+                                                    adaptor_rollout_wg=self.adaptor_rollout_wg,
+                                                    trainer_global_step=self.global_steps,
+                                                )
             print('validation generation end')
             del test_batch
             test_batch = test_output_gen_batch
@@ -1180,6 +1196,15 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        if Role.MemAdaptorRollout in self.role_worker_mapping:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.MemAdaptorRollout)
+            adaptor_rollout_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.MemAdaptorRollout],
+                config=self.config.mem_adaptor.actor_rollout_ref,
+                role="actor_rollout",
+            )
+            self.resource_pool_to_cls[resource_pool]["adaptor_rollout"] = adaptor_rollout_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -1211,6 +1236,9 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+        self.adaptor_rollout_wg = all_wg.get("adaptor_rollout")
+        if self.adaptor_rollout_wg is not None:
+            self.adaptor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -1237,6 +1265,15 @@ class RayPPOTrainer:
         max_critic_ckpt_to_keep = self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
 
         self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
+
+        if self.adaptor_rollout_wg is not None:
+            ma_local = os.path.join(local_global_step_folder, "mem_adaptor")
+            ma_remote = (
+                None
+                if self.config.trainer.default_hdfs_dir is None
+                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "mem_adaptor")
+            )
+            self.adaptor_rollout_wg.save_checkpoint(ma_local, ma_remote, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, "critic")
@@ -1289,11 +1326,23 @@ class RayPPOTrainer:
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
-        # load actor
-        self.actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        ma_path = os.path.join(global_step_folder, "mem_adaptor")
+        load_actor = bool(self.config.trainer.get("resume_load_actor", True))
+        load_ma = bool(self.config.trainer.get("resume_load_mem_adaptor", True))
+        load_critic = bool(self.config.trainer.get("resume_load_critic", True))
+        if load_actor:
+            self.actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        else:
+            print("[resume] Skipping actor weights (resume_load_actor=false); keeping weights from model init.")
+        if self.adaptor_rollout_wg is not None and os.path.isdir(ma_path) and load_ma:
+            self.adaptor_rollout_wg.load_checkpoint(ma_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        elif self.adaptor_rollout_wg is not None and os.path.isdir(ma_path) and not load_ma:
+            print("[resume] Skipping mem_adaptor weights (resume_load_mem_adaptor=false).")
         # load critic
-        if self.use_critic:
+        if self.use_critic and load_critic:
             self.critic_wg.load_checkpoint(critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        elif self.use_critic and not load_critic:
+            print("[resume] Skipping critic weights (resume_load_critic=false).")
 
         # load dataloader,
         # TODO: from remote not implemented yet
@@ -1401,6 +1450,8 @@ class RayPPOTrainer:
                                                                 actor_rollout_wg=self.actor_rollout_wg,
                                                                 envs=self.envs,
                                                                 is_train=True,
+                                                                adaptor_rollout_wg=self.adaptor_rollout_wg,
+                                                                trainer_global_step=self.global_steps,
                                                                 )
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
@@ -1433,6 +1484,59 @@ class RayPPOTrainer:
                         batch.batch['step_rewards'] = step_rewards_tensor
                     
                     batch = adjust_batch(self.config, batch)
+
+                    if train_memory_adaptor_enabled(self.config):
+                        if self.adaptor_rollout_wg is None:
+                            print("Warning: mem_adaptor.train_memory_adaptor is set but adaptor_rollout_wg is None.")
+                        elif self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+                            print(
+                                "Warning: mem_adaptor.train_memory_adaptor is only implemented for "
+                                "algorithm.adv_estimator=grpo; skipping adaptor policy update this step."
+                            )
+                        else:
+                            buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []
+                            if buf:
+                                ma_batch = build_memory_adaptor_grpo_batch(
+                                    config=self.config,
+                                    samples=buf,
+                                    gen_batch_output=batch,
+                                )
+                                if ma_batch is not None and len(ma_batch) > 0:
+                                    ma_batch = prepare_adaptor_batch_for_rl(ma_batch, self.config)
+                                    ma_batch.batch["response_mask"] = compute_response_mask(ma_batch)
+                                    ma_batch.meta_info["global_token_num"] = torch.sum(
+                                        ma_batch.batch["attention_mask"], dim=-1
+                                    ).tolist()
+                                    with _timer("mem_adaptor_old_log_prob", timing_raw):
+                                        ma_olp = self.adaptor_rollout_wg.compute_log_prob(ma_batch)
+                                        ma_olp.batch.pop("entropys", None)
+                                        ma_batch = ma_batch.union(ma_olp)
+                                    ma_batch.batch["token_level_rewards"] = ma_batch.batch["token_level_scores"]
+                                    norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
+                                    ma_batch = compute_advantage(
+                                        ma_batch,
+                                        adv_estimator=AdvantageEstimator.GRPO,
+                                        gamma=self.config.algorithm.gamma,
+                                        lam=self.config.algorithm.lam,
+                                        num_repeat=1,
+                                        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                        multi_turn=False,
+                                        use_pf_ppo=self.config.algorithm.use_pf_ppo,
+                                        pf_ppo_reweight_method=self.config.algorithm.pf_ppo.reweight_method,
+                                        pf_ppo_weight_pow=self.config.algorithm.pf_ppo.weight_pow,
+                                        step_advantage_w=self.config.algorithm.gigpo.step_advantage_w,
+                                        gigpo_mode=self.config.algorithm.gigpo.mode,
+                                        gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
+                                        gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
+                                    )
+                                    with _timer("mem_adaptor_update_policy", timing_raw):
+                                        ma_batch.meta_info["multi_turn"] = False
+                                        ma_out = self.adaptor_rollout_wg.update_actor(ma_batch)
+                                    if ma_out.meta_info and "metrics" in ma_out.meta_info:
+                                        ma_metrics = reduce_metrics(ma_out.meta_info["metrics"])
+                                        for k, v in ma_metrics.items():
+                                            metrics[f"mem_adaptor/{k}"] = v
+                        self.traj_collector.mem_adaptor_training_samples.clear()
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
@@ -1561,12 +1665,14 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
-                        with _timer("update_actor", timing_raw):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                        actor_trainable = self.config.actor_rollout_ref.actor.get("trainable", True)
+                        if actor_trainable:
+                            # update actor
+                            with _timer("update_actor", timing_raw):
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                            metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

@@ -125,7 +125,12 @@ class OpenAIApiRollout(BaseRollout):
             temperature = float(self.config.temperature)
             top_p = float(self.config.top_p)
 
-        max_tokens = int(self.config.response_length)
+        if prompts.meta_info.get("temperature") is not None:
+            temperature = float(prompts.meta_info["temperature"])
+        if prompts.meta_info.get("top_p") is not None:
+            top_p = float(prompts.meta_info["top_p"])
+
+        max_tokens = int(prompts.meta_info.get("response_length", self.config.response_length))
         responses_text = self._complete_batch(prompt_texts, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
 
         response = torch.full(

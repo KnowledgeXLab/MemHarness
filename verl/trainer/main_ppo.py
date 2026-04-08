@@ -31,6 +31,42 @@ def main(config):
     run_ppo(config)
 
 
+def _mem_adaptor_dedicated_rollout_wg(config) -> bool:
+    ma = OmegaConf.select(config, "mem_adaptor")
+    if ma is None or not bool(ma.get("enable", False)):
+        return False
+    return not bool(ma.get("use_actor_rollout_wg", True))
+
+
+def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
+    """Deep-copy actor_rollout_ref into mem_adaptor.actor_rollout_ref with adaptor model path."""
+    from omegaconf import open_dict
+
+    ma = config.mem_adaptor
+    path = OmegaConf.select(ma, "model.path")
+    if not path:
+        raise ValueError(
+            "mem_adaptor.model.path is required when mem_adaptor.enable=true and mem_adaptor.use_actor_rollout_wg=false."
+        )
+    if "train_memory_adaptor" in ma:
+        train_ma = bool(ma.get("train_memory_adaptor"))
+    else:
+        train_ma = bool(ma.get("trainable", False))
+    ref = OmegaConf.create(OmegaConf.to_container(config.actor_rollout_ref, resolve=True))
+    with open_dict(ref):
+        with open_dict(ref.model):
+            ref.model.path = path
+            shm = OmegaConf.select(ma, "model.use_shm")
+            if shm is not None:
+                ref.model.use_shm = shm
+        with open_dict(ref.actor):
+            ref.actor.trainable = train_ma
+            if train_ma:
+                ref.actor.use_kl_loss = False
+    with open_dict(config.mem_adaptor):
+        config.mem_adaptor.actor_rollout_ref = ref
+
+
 def run_ppo(config) -> None:
     # Check if Ray is not initialized
     if not ray.is_initialized():
@@ -64,6 +100,13 @@ class TaskRunner:
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
 
+        if _mem_adaptor_dedicated_rollout_wg(config):
+            if config.actor_rollout_ref.actor.strategy not in ("fsdp", "fsdp2"):
+                raise NotImplementedError(
+                    "Dedicated mem_adaptor WorkerGroup (use_actor_rollout_wg=false) is only supported for FSDP/FSDP2."
+                )
+            _attach_mem_adaptor_actor_rollout_ref(config)
+
         memory_server_handle = None
         if config.env.memory.enabled:
             from agent_system.memory.local_service import start_local_memory_server
@@ -81,6 +124,15 @@ class TaskRunner:
         try:
             # download the checkpoint from hdfs
             local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+            adaptor_tokenizer = None
+
+            if _mem_adaptor_dedicated_rollout_wg(config):
+                from omegaconf import open_dict
+
+                amref = config.mem_adaptor.actor_rollout_ref
+                adaptor_local = copy_to_local(amref.model.path, use_shm=amref.model.get("use_shm", False))
+                with open_dict(amref.model):
+                    amref.model.path = adaptor_local
 
             from agent_system.environments import make_envs
             envs, val_envs = make_envs(config)
@@ -91,6 +143,9 @@ class TaskRunner:
             trust_remote_code = config.data.get("trust_remote_code", False)
             tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
             processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)  # used for multimodal LLM, could be none
+
+            if _mem_adaptor_dedicated_rollout_wg(config):
+                adaptor_tokenizer = hf_tokenizer(config.mem_adaptor.actor_rollout_ref.model.path, trust_remote_code=trust_remote_code)
 
             # vllm early verify
             if config.actor_rollout_ref.rollout.name in ["vllm"]:
@@ -136,6 +191,33 @@ class TaskRunner:
                 Role.Critic: global_pool_id,
             }
 
+            if _mem_adaptor_dedicated_rollout_wg(config):
+                from agent_system.memory.mem_adaptor_training import train_memory_adaptor_enabled
+
+                if train_memory_adaptor_enabled(config):
+                    rn = str(config.mem_adaptor.actor_rollout_ref.rollout.name)
+                    if rn == "openai_api":
+                        raise ValueError(
+                            "mem_adaptor.train_memory_adaptor requires adaptor rollout.name to be hf or vllm "
+                            "(OpenAI API generation cannot train with FSDP log-prob)."
+                        )
+
+                nn = config.trainer.nnodes
+                gpus_spec = config.mem_adaptor.get("resource_pool_gpus_per_node")
+                if gpus_spec is None:
+                    mem_pool_spec = [1] * nn
+                elif isinstance(gpus_spec, int):
+                    mem_pool_spec = [gpus_spec] * nn
+                else:
+                    mem_pool_spec = list(gpus_spec)
+                if len(mem_pool_spec) != nn:
+                    raise ValueError(
+                        f"mem_adaptor.resource_pool_gpus_per_node must have length trainer.nnodes={nn}, got {len(mem_pool_spec)}"
+                    )
+                resource_pool_spec["mem_adaptor_pool"] = mem_pool_spec
+                role_worker_mapping[Role.MemAdaptorRollout] = ray.remote(actor_rollout_cls)
+                mapping[Role.MemAdaptorRollout] = "mem_adaptor_pool"
+
             # we should adopt a multi-source reward function here
             # - for rule-based rm, we directly call a reward score
             # - for model-based rm, we call a model
@@ -174,7 +256,12 @@ class TaskRunner:
             assert config.actor_rollout_ref.rollout.n == 1, "In verl, actor_rollout_ref.rollout.n>1 is for GRPO. In verl+env, we keep n=1, and achieve GRPO by env.rollout.n"
 
             from agent_system.multi_turn_rollout import TrajectoryCollector
-            traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)
+            traj_collector = TrajectoryCollector(
+                config=config,
+                tokenizer=tokenizer,
+                processor=processor,
+                adaptor_tokenizer=adaptor_tokenizer,
+            )
 
             from verl.utils.dataset.rl_dataset import collate_fn
 
