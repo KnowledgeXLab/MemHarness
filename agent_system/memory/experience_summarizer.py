@@ -665,7 +665,7 @@ def maybe_summarize_and_write_experiences(
         oa = es["openai_api"]
         model_label = str(oa["model"])
 
-    parse_max_attempts = max(1, int(es.get("parse_max_attempts", 3)))
+    parse_max_attempts = max(1, int(es["parse_max_attempts"]))
 
     n_pending = len(trajectory_user_messages)
     raw_outputs: List[str] = [""] * n_pending
