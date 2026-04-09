@@ -33,9 +33,9 @@ def main(config):
 
 def _mem_adaptor_dedicated_rollout_wg(config) -> bool:
     ma = OmegaConf.select(config, "mem_adaptor")
-    if ma is None or not bool(ma.get("enable", False)):
+    if ma is None or not bool(ma.get("enable", False)): # if mem_adaptor is not enabled, return False
         return False
-    return not bool(ma.get("use_actor_rollout_wg", True))
+    return not bool(ma.get("use_actor_rollout_wg", True)) # if use_actor_rollout_wg is false, return True
 
 
 def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
@@ -48,10 +48,7 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
         raise ValueError(
             "mem_adaptor.model.path is required when mem_adaptor.enable=true and mem_adaptor.use_actor_rollout_wg=false."
         )
-    if "train_memory_adaptor" in ma:
-        train_ma = bool(ma.get("train_memory_adaptor"))
-    else:
-        train_ma = bool(ma.get("trainable", False))
+    train_ma = bool(ma.get("train_memory_adaptor", False))
     ref = OmegaConf.create(OmegaConf.to_container(config.actor_rollout_ref, resolve=True))
     with open_dict(ref):
         with open_dict(ref.model):
@@ -99,7 +96,8 @@ class TaskRunner:
 
         pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
         OmegaConf.resolve(config)
-
+        
+        # if mem_adaptor is enabled and use_actor_rollout_wg is false, attach the mem_adaptor actor rollout ref
         if _mem_adaptor_dedicated_rollout_wg(config):
             if config.actor_rollout_ref.actor.strategy not in ("fsdp", "fsdp2"):
                 raise NotImplementedError(
@@ -107,6 +105,7 @@ class TaskRunner:
                 )
             _attach_mem_adaptor_actor_rollout_ref(config)
 
+        # start the memory server
         memory_server_handle = None
         if config.env.memory.enabled:
             from agent_system.memory.local_service import start_local_memory_server
@@ -344,7 +343,7 @@ def create_rl_sampler(data_config, dataset):
     # use sampler for better ckpt resume
     if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
-        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
+        train_dataloader_generator.manual_seed(data_config.get("seed", 42))
         sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
     else:
         sampler = SequentialSampler(data_source=dataset)

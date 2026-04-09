@@ -317,7 +317,7 @@ ray_init:
 
 env:
   env_name: alfworld/AlfredTWEnv
-  seed: 0
+  seed: 42
   max_steps: 50
   history_length: 2
   memory:
@@ -330,36 +330,34 @@ env:
     collection_name: null   # Optional collection name; auto-generated when null.
     clean_before_init: False   # Whether to clean existing local db files before initialization.
     write_back: False   # Whether to write rollout trajectories back into memory online.
-    only_store_positive_reward: True   # When write_back is enabled, only keep positive-reward samples.
+    only_store_positive_reward: False   # When write_back is enabled, only keep positive-reward samples.
     max_pairs_per_episode: 8   # When write_back is enabled, max number of memory pairs extracted from one episode.
     # Whole-trajectory summarization then VDB insert (requires write_back=true, mode=self|teacher).
     experience_summarizer:
       mode: none   # none | self (actor_rollout_wg.generate_sequences) | teacher (OpenAI-compatible HTTP)
-      system_prompt: >-
-        You distill a finished task trajectory into one short, reusable principle or lesson
-        (what worked, what to avoid, or how to decide). Output plain text only, no bullet labels unless needed.
-      user_template: |-
-        Trajectory (context and model action per step):
-        {trajectory_text}
-
-        Episode return: {episode_reward}. Success flag: {success}. Trajectory id: {traj_uid}.
-        Write the single principle paragraph only.
+      num_memories_per_trajectory: 2 # how many memories to extract from each trajectory
+      summarization_batch_size: 0 # max trajectories per LLM batch (0 = submit all pending trajectories in one call).
+      parse_max_attempts: 3 # max model calls when JSON parse yields no memories or all items fail validation (state/action/memory_text).
+      extractor_model_label: online_rollout # optional label stored in record metadata (teacher defaults to openai_api.model).
+      system_prompt: "" # empty -> built-in JSON extraction system prompt
+      trajectory_user_prompt_template: "" # empty -> built-in template (same schema as extract_memory_records.py)
       max_trajectory_chars: 32000
-      max_new_tokens: 512
-      temperature: 0.3
+      max_new_tokens: 4096
+      temperature: 0.6
       top_p: 1.0
       do_sample: false
       openai_api:
         base_url: https://api.openai.com/v1
         api_key: ${oc.env:OPENAI_API_KEY,}
         model: gpt-4o-mini
-        max_tokens: 512
-        temperature: 0.3
+        max_tokens: 4096
+        temperature: 0.6
         timeout_sec: 120.0
         max_concurrent: 8
         max_retries: 2
         retry_backoff_sec: 1.0
         extra_headers: {}
+        response_format_json: true
     count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
@@ -374,7 +372,8 @@ env:
     embedding_dim: 1024   # Embedding vector dimension.
     vdb_timeout: 30   # Request timeout in seconds for the memory backend.
     retrieve_key: memory_text  # memory_text | state_text
-    top_k: 3   # Number of retrieved memories injected each time.
+    # VDB retrieval width; MemAdaptor may use only the first mem_adaptor.retrieval_top_k hits from memory_event.retrieved.
+    top_k: 3
     min_retrieval_score: 0.0   # Minimum retrieval score threshold.
     only_successful: True   # Whether retrieval only searches memories from successful trajectories.
     rebuild_insert_batch_size: 1000   # Batch size for inserting records during rebuild.
@@ -386,7 +385,7 @@ env:
     max_state_chars: 1200   # Max stored state text length.
     max_action_chars: 400   # Max stored action text length.
     max_memory_chars: 1200   # Max stored memory text length.
-    prompt_header: "Relevant past experiences are provided below. Reuse them only if you think which ones are useful."   # Header inserted before retrieved memories.
+    prompt_header: "Relevant past memories are provided below. Reuse them only if you think which ones are useful."   # Header inserted before retrieved memories.
   resources_per_worker: # resources for each env worker
     num_cpus: 0.1
     num_gpus: 0
@@ -416,16 +415,15 @@ env:
 mem_adaptor:
   enable: false
   schedule: on_memory_only   # on_memory_only | every_step
-  use_actor_rollout_wg: true   # false -> second Role on mem_adaptor_pool (see verl/trainer/main_ppo.py)
+  use_actor_rollout_wg: false   # false -> second Role on mem_adaptor_pool (see verl/trainer/main_ppo.py)
   retrieval_top_k: 1   # take top-k retrieved (S_old,P_old) hits; one batched generate; merges non-EMPTY outputs
   multi_hit_joiner: "\n\n"   # between accepted adapted principles when retrieval_top_k > 1
-  # Optimize Memory Adaptor with GRPO (episode return on adaptor completions). Requires use_actor_rollout_wg=false,
-  # a local adaptor rollout (hf/vllm), and algorithm.adv_estimator=grpo. Reasoning: trainable=false (frozen) or true (joint).
+  # Optimize Memory Adaptor with GRPO (episode return on adaptor completions). Requires mem_adaptor.enable=true,
+  # use_actor_rollout_wg=false, dedicated model.path, local adaptor rollout (hf/vllm), and algorithm.adv_estimator=grpo.
+  # Reasoning: actor_rollout_ref.actor.trainable false (frozen) or true (joint).
   train_memory_adaptor: false
   # After GRPO advantage on Adaptor rows: divide each row's adv by (# Adaptor calls on that traj).
   grpo_divide_advantage_by_traj_adaptor_steps: true
-  # If train_memory_adaptor is omitted, ``trainable`` is used as fallback (legacy).
-  trainable: false
   model:
     path: null   # HF checkpoint for adaptor when use_actor_rollout_wg=false (required then)
     use_shm: false

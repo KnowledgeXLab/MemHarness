@@ -33,7 +33,7 @@ def mem_adaptor_enabled(config: DictConfig) -> bool:
 
 def _normalize_adaptor_output(text: str, empty_markers: Sequence[str]) -> Tuple[str, bool]:
     """Returns (stripped text, is_empty_reject)."""
-    t = (text or "").strip()
+    t = text.strip()
     low = t.lower()
     for m in empty_markers:
         if t == m or low == m.lower():
@@ -45,15 +45,15 @@ def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tupl
     """S_old, P_old pairs from MemoryEvent.to_dict()['retrieved'][:top_k]."""
     if not memory_event or not isinstance(memory_event, dict) or top_k <= 0:
         return []
-    ret = memory_event.get("retrieved") or []
+    ret = memory_event["retrieved"] or []
     out: List[Tuple[str, str]] = []
     for r in ret[:top_k]:
         if not isinstance(r, dict):
             continue
         out.append(
             (
-                str(r.get("state_text", "") or ""),
-                str(r.get("memory_text", "") or ""),
+                str(r["state_text"]),
+                str(r["memory_text"]),
             )
         )
     return out
@@ -74,9 +74,11 @@ def _should_run_adaptor_for_index(
         return False
     if schedule == "every_step":
         return True
-    injected = (info.get("memory_injected_text") or "").strip()
-    ev = info.get("memory_event")
-    has_ret = bool(isinstance(ev, dict) and (ev.get("retrieved") or []))
+    # if the memory is injected, return True
+    injected = (info["memory_injected_text"] or "").strip()
+    ev = info["memory_event"]
+    # if the memory event has retrieved, return True
+    has_ret = bool(isinstance(ev, dict) and (ev["retrieved"] or []))
     return bool(injected) or has_ret
 
 
@@ -84,8 +86,8 @@ def _passes_train_global_window(ma: DictConfig, trainer_global_step: Optional[in
     """If ``trainer_global_step`` is None, no global bound is applied."""
     if trainer_global_step is None:
         return True
-    t0 = ma.get("train_global_step_start", None)
-    t1 = ma.get("train_global_step_end", None)
+    t0 = ma["train_global_step_start"]
+    t1 = ma["train_global_step_end"]
     if t0 is not None and trainer_global_step < int(t0):
         return False
     if t1 is not None and trainer_global_step >= int(t1):
@@ -97,9 +99,9 @@ def _passes_env_step_window(ma: DictConfig, env_step_1based: Optional[int]) -> b
     """Env step index after the current env step (matches post-increment ``episode_lengths[i]``)."""
     if env_step_1based is None:
         return True
-    es0 = ma.get("env_step_start", None)
-    es1 = ma.get("env_step_end", None)
-    ev_n = int(ma.get("env_step_every_n", 1) or 1)
+    es0 = ma["env_step_start"]
+    es1 = ma["env_step_end"]
+    ev_n = int(ma["env_step_every_n"])
     start = int(es0) if es0 is not None else 1
     if env_step_1based < start:
         return False
@@ -125,13 +127,13 @@ def _build_adaptor_prompt(
     p_old: str,
     apply_chat_template_kwargs: Optional[dict] = None,
 ) -> str:
-    tmpl = str(ma.get("user_message_template", ""))
+    tmpl = str(ma["user_message_template"])
     user_content = tmpl.format(
-        s_curr=_clip(s_curr, int(ma.get("max_prompt_chars", 12000))),
-        s_old=_clip(s_old, int(ma.get("max_prompt_chars", 12000))),
-        p_old=_clip(p_old, int(ma.get("max_prompt_chars", 12000))),
+        s_curr=_clip(s_curr, int(ma["max_prompt_chars"])),
+        s_old=_clip(s_old, int(ma["max_prompt_chars"])),
+        p_old=_clip(p_old, int(ma["max_prompt_chars"])),
     )
-    system_prompt = str(ma.get("system_prompt", ""))
+    system_prompt = str(ma["system_prompt"])
     apply_kw = dict(apply_chat_template_kwargs or {})
     messages = [
         {"role": "system", "content": system_prompt},
@@ -199,10 +201,10 @@ def build_adaptor_dataproto(
 
 def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> Tuple[str, bool]:
     """Build merged replacement string and whether every hit is a reject (<EMPTY>)."""
-    markers = list(ma.get("empty_output_markers", ["<EMPTY>", "<empty>"]))
-    no_exp = str(ma.get("no_experience_message", "")).strip()
-    prefix = str(ma.get("adapted_injection_prefix", "Adapted memory principle:\n"))
-    joiner = str(ma.get("multi_hit_joiner", "\n\n"))
+    markers = list(ma["empty_output_markers"])
+    no_exp = str(ma["no_experience_message"]).strip()
+    prefix = str(ma["adapted_injection_prefix"])
+    joiner = str(ma["multi_hit_joiner"])
 
     cleaned_parts: List[str] = []
     any_accept = False
@@ -235,11 +237,14 @@ def _patch_one_obs_text(
     raw_outputs: Sequence[str],
     all_reject: bool,
 ) -> None:
+    """replace original memory text with the replacement text modified by the adaptor."""
+    # TODO: check in the log
+
     infos[i]["mem_adaptor_raw_outputs"] = list(raw_outputs)
-    infos[i]["mem_adaptor_raw_output"] = raw_outputs[0] if raw_outputs else ""
+    infos[i]["mem_adaptor_raw_output"] = raw_outputs[0]
     infos[i]["mem_adaptor_reject"] = all_reject
 
-    injected = (infos[i].get("memory_injected_text") or "").strip()
+    injected = infos[i]["memory_injected_text"].strip()
     t = texts[i]
     if injected:
         needle = "\n\n" + injected
@@ -298,10 +303,10 @@ def maybe_apply_memory_adaptor(
         return
 
     ma = _mem_cfg(config)
-    schedule = str(ma.get("schedule", "on_memory_only"))
-    top_k = max(1, int(ma.get("retrieval_top_k", 1)))
+    schedule = str(ma["schedule"])
+    top_k = max(1, int(ma["retrieval_top_k"]))
     wg = adaptor_rollout_wg
-    if wg is None and bool(ma.get("use_actor_rollout_wg", True)):
+    if wg is None and bool(ma["use_actor_rollout_wg"]):
         wg = generate_wg
     if wg is None:
         return
@@ -309,18 +314,18 @@ def maybe_apply_memory_adaptor(
     if not _passes_train_global_window(ma, trainer_global_step):
         return
 
-    texts = next_obs.get("text")
+    texts = next_obs["text"]
     if not isinstance(texts, list):
         return
 
-    anchors = next_obs.get("anchor")
+    anchors = next_obs["anchor"]
     batch_n = len(texts)
-    max_prompt_length = int(config.data.max_prompt_length)
-    truncation = str(config.data.get("truncation", "error"))
+    max_prompt_length = int(config.data["max_prompt_length"])
+    truncation = str(config.data["truncation"])
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id
-    chat_kw = OmegaConf.to_container(config.data.get("apply_chat_template_kwargs", {}), resolve=True) or {}
+    chat_kw = OmegaConf.to_container(config.data["apply_chat_template_kwargs"], resolve=True) or {}
 
     row_env_indices: List[int] = []
     rows: List[dict] = []
@@ -332,7 +337,7 @@ def maybe_apply_memory_adaptor(
             env_step_i = int(episode_lengths[i])
         if not _passes_env_step_window(ma, env_step_i):
             continue
-        ev = infos[i].get("memory_event")
+        ev = infos[i]["memory_event"]
         pairs = _retrieved_state_principle_pairs(ev, top_k)
         if anchors is not None and i < len(anchors):
             s_curr = str(anchors[i] if anchors[i] is not None else "")
@@ -340,7 +345,7 @@ def maybe_apply_memory_adaptor(
             s_curr = str(texts[i] if texts[i] is not None else "")
 
         if schedule == "on_memory_only":
-            injected = (infos[i].get("memory_injected_text") or "").strip()
+            injected = infos[i]["memory_injected_text"].strip()
             if not pairs and not injected:
                 continue
             if not pairs and injected:
@@ -348,16 +353,16 @@ def maybe_apply_memory_adaptor(
                 pairs = [("", "")]
 
         if not pairs and schedule == "every_step":
-            ph_s = str(ma.get("placeholder_old_state", "(none)"))
-            ph_p = str(ma.get("placeholder_old_principle", "(none)"))
+            ph_s = str(ma["placeholder_old_state"])
+            ph_p = str(ma["placeholder_old_principle"])
             pairs = [(ph_s, ph_p)]
 
         for s_old, p_old in pairs:
-            if schedule == "on_memory_only" and not (s_old or p_old) and not (infos[i].get("memory_injected_text") or "").strip():
+            if schedule == "on_memory_only" and not (s_old or p_old) and not infos[i]["memory_injected_text"].strip():
                 continue
             if not s_old and not p_old and schedule == "every_step":
-                s_old = str(ma.get("placeholder_old_state", "(none)"))
-                p_old = str(ma.get("placeholder_old_principle", "(none)"))
+                s_old = str(ma["placeholder_old_state"])
+                p_old = str(ma["placeholder_old_principle"])
 
             prompt = _build_adaptor_prompt(
                 tokenizer,

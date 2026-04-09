@@ -59,14 +59,13 @@ def prune_mem_adaptor_training_samples_after_group_filter(
 
 
 def train_memory_adaptor_enabled(config: DictConfig) -> bool:
+    """True when adaptor GRPO updates should run: enabled, dedicated WG, and ``train_memory_adaptor``."""
     ma = OmegaConf.select(config, "mem_adaptor")
     if ma is None or not bool(ma.get("enable", False)):
         return False
     if bool(ma.get("use_actor_rollout_wg", True)):
         return False
-    if "train_memory_adaptor" in ma:
-        return bool(ma.get("train_memory_adaptor"))
-    return bool(ma.get("trainable", False))
+    return bool(ma.get("train_memory_adaptor", False))
 
 
 def _traj_uid_to_episode_reward(gen_batch: DataProto) -> Dict[str, float]:

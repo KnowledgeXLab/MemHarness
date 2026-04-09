@@ -586,6 +586,22 @@ class RayPPOTrainer:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
 
+        ma = OmegaConf.select(config, "mem_adaptor")
+        if ma is not None and bool(ma.get("train_memory_adaptor", False)):
+            if not bool(ma.get("enable", False)):
+                raise ValueError(
+                    "mem_adaptor.train_memory_adaptor=true requires mem_adaptor.enable=true."
+                )
+            if bool(ma.get("use_actor_rollout_wg", True)):
+                raise ValueError(
+                    "mem_adaptor.train_memory_adaptor=true requires mem_adaptor.use_actor_rollout_wg=false."
+                )
+            if config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+                raise ValueError(
+                    "mem_adaptor.train_memory_adaptor=true requires algorithm.adv_estimator=grpo "
+                    f"(got {config.algorithm.adv_estimator})."
+                )
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
@@ -1488,11 +1504,14 @@ class RayPPOTrainer:
 
                     if train_memory_adaptor_enabled(self.config):
                         if self.adaptor_rollout_wg is None:
-                            print("Warning: mem_adaptor.train_memory_adaptor is set but adaptor_rollout_wg is None.")
+                            print(
+                                "Warning: mem_adaptor training is active but adaptor_rollout_wg is None "
+                                "(check Role.MemAdaptorRollout / resource pool and mem_adaptor.use_actor_rollout_wg=false)."
+                            )
                         elif self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
                             print(
-                                "Warning: mem_adaptor.train_memory_adaptor is only implemented for "
-                                "algorithm.adv_estimator=grpo; skipping adaptor policy update this step."
+                                "Warning: mem_adaptor training expects algorithm.adv_estimator=grpo; "
+                                f"got {self.config.algorithm.adv_estimator}; skipping adaptor policy update."
                             )
                         else:
                             buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []

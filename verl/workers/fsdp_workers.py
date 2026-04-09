@@ -582,6 +582,19 @@ class ActorRolloutRefWorker(Worker):
                 for p in self.actor_module_fsdp.parameters():
                     p.requires_grad_(False)
 
+                # TODO: delete this block after checks.
+                # MemAdaptor TEMP: verify frozen actor (optimizer None + no grad). Delete this block after checks.
+                _plist = list(self.actor_module_fsdp.parameters())
+                _sample_grad = [p.requires_grad for p in _plist[: min(3, len(_plist))]]
+                logger.warning(
+                    "[MemAdaptor DEBUG frozen actor] optimizer_is_none=%s sample_requires_grad=%s n_params=%d model_path=%s",
+                    self.actor_optimizer is None,
+                    _sample_grad,
+                    len(_plist),
+                    str(self.config.model.get("path", ""))[:120],
+                )
+                # end MemAdaptor TEMP
+
         # load from checkpoint
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
