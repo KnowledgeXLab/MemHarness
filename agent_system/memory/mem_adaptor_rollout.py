@@ -284,10 +284,15 @@ def maybe_apply_memory_adaptor(
     episode_lengths: Optional[np.ndarray] = None,
     adaptor_training_buffer: Optional[List[Dict[str, Any]]] = None,
     traj_uid: Optional[np.ndarray] = None,
+    grpo_group_uid: Optional[np.ndarray] = None,
 ) -> None:
     """
     After ``step_with_memory``, optionally run batched Adaptor ``generate_sequences`` and
     patch ``next_obs['text']``. Mutates ``next_obs`` and ``infos`` in place.
+
+    For training, pass ``grpo_group_uid`` (same layout as ``traj_uid``): Reasoning GRPO group id
+    per env, reused across ``env.rollout.n`` parallel envs so Adaptor GRPO can compare trajectory
+    returns within the same group (see ``mem_adaptor_training``).
     """
     if not mem_adaptor_enabled(config):
         return
@@ -393,6 +398,10 @@ def maybe_apply_memory_adaptor(
             env_i = row_env_indices[k]
             if env_i < 0 or env_i >= len(traj_uid):
                 continue
+            if grpo_group_uid is not None and env_i < len(grpo_group_uid):
+                grpo_id = str(grpo_group_uid[env_i])
+            else:
+                grpo_id = str(uuid.uuid4())
             rec: Dict[str, Any] = {
                 "prompts": out.batch["prompts"][k].detach().cpu().clone(),
                 "responses": out.batch["responses"][k].detach().cpu().clone(),
@@ -400,7 +409,7 @@ def maybe_apply_memory_adaptor(
                 "attention_mask": out.batch["attention_mask"][k].detach().cpu().clone(),
                 "position_ids": out.batch["position_ids"][k].detach().cpu().clone(),
                 "traj_uid": str(traj_uid[env_i]),
-                "grpo_index": str(uuid.uuid4()),
+                "grpo_index": grpo_id,
                 "pad_token_id": pad_tok,
             }
             if "rollout_log_probs" in out.batch.keys():

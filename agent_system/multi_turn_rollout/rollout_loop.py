@@ -517,6 +517,7 @@ class TrajectoryCollector:
                 episode_lengths=episode_lengths,
                 adaptor_training_buffer=adaptor_train_buf,
                 traj_uid=traj_uid,
+                grpo_group_uid=uid_batch,
             )
             write_mem_adaptor_step_non_tensor_batch(batch, infos, batch_size)
 

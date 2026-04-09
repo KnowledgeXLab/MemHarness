@@ -66,6 +66,7 @@ from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 from agent_system.memory.mem_adaptor_training import (
     build_memory_adaptor_grpo_batch,
     prepare_adaptor_batch_for_rl,
+    scale_adaptor_grpo_advantages_by_traj_adaptor_steps,
     train_memory_adaptor_enabled,
 )
 
@@ -1496,6 +1497,8 @@ class RayPPOTrainer:
                         else:
                             buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []
                             if buf:
+                                # Outcome signal: traj episode return on rollout batch (episode_rewards), not
+                                # Reasoning token_level_scores from reward_fn.
                                 ma_batch = build_memory_adaptor_grpo_batch(
                                     config=self.config,
                                     samples=buf,
@@ -1529,6 +1532,14 @@ class RayPPOTrainer:
                                         gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
                                         gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
                                     )
+                                    scale_adaptor_grpo_advantages_by_traj_adaptor_steps(
+                                        ma_batch,
+                                        bool(
+                                            self.config.mem_adaptor.get(
+                                                "grpo_divide_advantage_by_traj_adaptor_steps", True
+                                            )
+                                        ),
+                                    )
                                     with _timer("mem_adaptor_update_policy", timing_raw):
                                         ma_batch.meta_info["multi_turn"] = False
                                         ma_out = self.adaptor_rollout_wg.update_actor(ma_batch)
@@ -1536,6 +1547,12 @@ class RayPPOTrainer:
                                         ma_metrics = reduce_metrics(ma_out.meta_info["metrics"])
                                         for k, v in ma_metrics.items():
                                             metrics[f"mem_adaptor/{k}"] = v
+                            else:
+                                print(
+                                    "Warning: mem_adaptor training is enabled (GRPO) but this rollout step "
+                                    "collected no adaptor samples (mem_adaptor_training_samples empty); "
+                                    "skipping adaptor policy update."
+                                )
                         self.traj_collector.mem_adaptor_training_samples.clear()
 
                     batch.batch["response_mask"] = compute_response_mask(batch)

@@ -12,8 +12,36 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from collections import Counter
+
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
+
+
+def scale_adaptor_grpo_advantages_by_traj_adaptor_steps(batch: DataProto, enabled: bool) -> None:
+    """
+    After ``compute_grpo_outcome_advantage``, optionally divide each row's advantages/returns by
+    the number of Adaptor training rows from the same ``traj_uid`` (credit split across calls).
+    """
+    if not enabled or batch.batch is None or "advantages" not in batch.batch:
+        return
+    tu = batch.non_tensor_batch.get("traj_uid")
+    if tu is None:
+        return
+    n_rows = len(tu)
+    keys = [str(tu[i]) for i in range(n_rows)]
+    counts = Counter(keys)
+    adv = batch.batch["advantages"]
+    for i in range(n_rows):
+        c = counts[keys[i]]
+        if c > 0:
+            adv[i] = adv[i] / float(c)
+    if "returns" in batch.batch:
+        ret = batch.batch["returns"]
+        for i in range(n_rows):
+            c = counts[keys[i]]
+            if c > 0:
+                ret[i] = ret[i] / float(c)
 
 
 def prune_mem_adaptor_training_samples_after_group_filter(
@@ -67,7 +95,9 @@ def build_memory_adaptor_grpo_batch(
     Collate adaptor rollout rows and attach outcome reward on the last non-pad response token.
 
     Each ``samples`` entry: CPU tensors prompts, responses, input_ids, attention_mask, position_ids;
-    int pad_token_id; str traj_uid, grpo_index.
+    int pad_token_id; str traj_uid; ``grpo_index`` = Reasoning GRPO group uid (shared across the
+    ``env.rollout.n`` parallel envs) so ``compute_grpo_outcome_advantage`` dedupes one return per
+    ``(uid, traj_uid)`` and compares across trajectories in the same group.
     """
     if not samples:
         return None

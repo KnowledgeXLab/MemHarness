@@ -422,6 +422,8 @@ mem_adaptor:
   # Optimize Memory Adaptor with GRPO (episode return on adaptor completions). Requires use_actor_rollout_wg=false,
   # a local adaptor rollout (hf/vllm), and algorithm.adv_estimator=grpo. Reasoning: trainable=false (frozen) or true (joint).
   train_memory_adaptor: false
+  # After GRPO advantage on Adaptor rows: divide each row's adv by (# Adaptor calls on that traj).
+  grpo_divide_advantage_by_traj_adaptor_steps: true
   # If train_memory_adaptor is omitted, ``trainable`` is used as fallback (legacy).
   trainable: false
   model:
