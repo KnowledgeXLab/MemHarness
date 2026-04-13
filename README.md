@@ -240,9 +240,10 @@ To run an agent in any of these environments, you must first install and configu
 ### 1. ALFWorld
 Install with pip:
 ```bash
-pip3 install gymnasium==0.29.1
-pip3 install stable-baselines3==2.6.0
-pip install alfworld
+conda create -n verl-agent-alfworld --clone verl-agent
+uv pip install gymnasium==0.29.1
+uv pip install stable-baselines3==2.6.0
+uv pip install alfworld
 ```
 
 Download PDDL & Game files and pre-trained MaskRCNN detector (will be stored in `~/.cache/alfworld/`):

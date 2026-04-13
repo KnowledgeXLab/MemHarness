@@ -83,7 +83,7 @@ python3 -m examples.data_preprocess.prepare \
     --local_dir "${DATA_ROOT}" \
     --infer_alfworld_sizes \
     --alfworld_eval_split eval_in_distribution \
-    "${PREPARE_FLAGS[@]}"
+    "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 python3 -m verl.trainer.main_ppo \
     ray_init.object_store_memory=${RAY_OBJECT_STORE_BYTES} \
