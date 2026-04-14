@@ -5,7 +5,6 @@ export RAY_ADDRESS='http://10.140.37.75:8265'
 
 ENGINE="vllm" # 须为 vllm（或 hf）；勿用 openai_api 搭配 train_memory_adaptor, vllm | openai_api；openai_api 时需 export OPENAI_API_KEY
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export CUDA_VISIBLE_DEVICES=0,1
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
@@ -14,9 +13,10 @@ trainer_n_gpus_per_node=6
 # mem_adaptor 专用池每节点 GPU 数（main_ppo 默认与 nnodes 同长度的 1 列表）
 mem_adaptor_gpus_per_node=2
 GPU_NUM="${trainer_n_gpus_per_node}"
-# Ray Object Store（Plasma）内存上限，单位 GiB；传给 ray_init.object_store_memory（字节）
-RAY_OBJECT_STORE_GIB=160
-RAY_OBJECT_STORE_BYTES=$((RAY_OBJECT_STORE_GIB * 1024 * 1024 * 1024))
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
 
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
@@ -30,7 +30,16 @@ TASK_NAME="alfworld"
 MEMORY_ENABLED=True
 RETRIEVAL_MODE="agentic" # agentic | fixed
 RETRIEVE_KEY="memory_text" # memory_text | state_text
-EMBEDDING_API_URL=""
+EMBEDDING_API_URL="http://10.140.37.43:8887/v1"
+EMBEDDING_API_KEY="DataFrontier_bge_m3"
+
+MEMORY_REMOTE_SLURM=True
+MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
+MEMORY_REMOTE_SERVER_PORT="8765"
+MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
+MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
+MEMORY_REMOTE_CONDA_ENV="verl-agent"
+
 # 与 eval 一致：预构建记忆 jsonl；留空则不传参（沿用 yaml 默认 null）
 MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 
@@ -56,7 +65,7 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配；可先改小做冒烟
-train_data_size=16
+train_data_size=18
 val_data_size=128
 group_size=8
 max_concurrent=32
@@ -85,10 +94,30 @@ fi
 if [ -n "${EMBEDDING_API_URL}" ]; then
   MEMORY_CLI+=(env.memory.embedding_api_url="${EMBEDDING_API_URL}")
 fi
+if [ -n "${EMBEDDING_API_KEY}" ]; then
+  MEMORY_CLI+=(env.memory.embedding_api_key="${EMBEDDING_API_KEY}")
+fi
+
+REMOTE_VDB_CLI=()
+# 接受 True/true/1/yes，避免与 MEMORY_ENABLED 等处写法不一致时静默退回本机 VDB
+MEMORY_REMOTE_SLURM_LC="$(printf '%s' "${MEMORY_REMOTE_SLURM:-false}" | tr '[:upper:]' '[:lower:]')"
+if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "1" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "yes" ]; then
+  REMOTE_VDB_CLI+=(
+    env.memory.remote_slurm_launch.enable=true
+    env.memory.remote_slurm_launch.partition="${MEMORY_REMOTE_PARTITION}"
+    env.memory.remote_slurm_launch.server_port="${MEMORY_REMOTE_SERVER_PORT}"
+    env.memory.server_port="${MEMORY_REMOTE_SERVER_PORT}"
+    env.memory.remote_slurm_launch.conda_sh="${MEMORY_CONDA_SH}"
+    env.memory.remote_slurm_launch.conda_env="${MEMORY_REMOTE_CONDA_ENV}"
+    env.memory.remote_slurm_launch.repo_root="${REPO_ROOT}"
+  )
+  if [ -n "${MEMORY_APPTAINER_SIF}" ]; then
+    REMOTE_VDB_CLI+=(env.memory.remote_slurm_launch.apptainer_sif="${MEMORY_APPTAINER_SIF}")
+  fi
+fi
 
 ray job submit --runtime-env-json '{"excludes": ["logs", "ray_log", "swanlog"]}' -- \
     python3 -m verl.trainer.main_ppo \
-      ray_init.object_store_memory="${RAY_OBJECT_STORE_BYTES}" \
       algorithm.adv_estimator=grpo \
       data.train_files="${TRAIN_FILE}" \
       data.val_files="${VAL_FILE}" \
@@ -140,6 +169,7 @@ ray job submit --runtime-env-json '{"excludes": ["logs", "ray_log", "swanlog"]}'
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
+      "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
       env.rollout.n="${group_size}" \
       env.resources_per_worker.num_cpus="${num_cpus_per_env_worker}" \
       trainer.critic_warmup=0 \

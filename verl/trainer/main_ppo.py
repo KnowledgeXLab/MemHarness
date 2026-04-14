@@ -16,14 +16,25 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import os
+from importlib.metadata import PackageNotFoundError, version as importlib_pkg_version
 
 import hydra
 import ray
 from omegaconf import OmegaConf, open_dict
+from packaging import version as packaging_version
 
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+
+
+def _installed_pkg_version_ge(pkg: str, minver: str) -> bool:
+    """Compare installed distribution version without importing the package (no CUDA/Triton)."""
+    try:
+        v = importlib_pkg_version(pkg)
+    except PackageNotFoundError:
+        return False
+    return packaging_version.parse(v) >= packaging_version.parse(minver)
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -77,8 +88,12 @@ def run_ppo(config) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        ray_init_dict = OmegaConf.to_container(ray_init_kwargs, resolve=True)
+        # 连接已有集群（RAY_ADDRESS 或 ray_init.address）时，Ray 禁止再传 object_store_memory。
+        if os.environ.get("RAY_ADDRESS") or ray_init_dict.get("address"):
+            ray_init_dict.pop("object_store_memory", None)
+        print(f"ray init kwargs: {ray_init_dict}")
+        ray.init(**ray_init_dict)
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
@@ -126,8 +141,6 @@ class TaskRunner:
             adaptor_tokenizer = None
 
             if _mem_adaptor_dedicated_rollout_wg(config):
-                from omegaconf import open_dict
-
                 amref = config.mem_adaptor.actor_rollout_ref
                 adaptor_local = copy_to_local(amref.model.path, use_shm=amref.model.get("use_shm", False))
                 with open_dict(amref.model):
@@ -146,12 +159,10 @@ class TaskRunner:
             if _mem_adaptor_dedicated_rollout_wg(config):
                 adaptor_tokenizer = hf_tokenizer(config.mem_adaptor.actor_rollout_ref.model.path, trust_remote_code=trust_remote_code)
 
-            # vllm early verify
+            # vllm early verify：勿 import verl.utils.vllm_utils（会加载 vLLM+Triton；TaskRunner 未申请 GPU 时易报 0 active drivers）
             if config.actor_rollout_ref.rollout.name in ["vllm"]:
-                from verl.utils.vllm_utils import is_version_ge
-
                 if config.actor_rollout_ref.model.get("lora_rank", 0) > 0:
-                    if not is_version_ge(pkg="vllm", minver="0.7.3"):
+                    if not _installed_pkg_version_ge("vllm", "0.7.3"):
                         raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
 
             # define worker classes

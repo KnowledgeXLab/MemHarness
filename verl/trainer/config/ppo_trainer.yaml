@@ -378,6 +378,28 @@ env:
     only_successful: True   # Whether retrieval only searches memories from successful trajectories.
     rebuild_insert_batch_size: 1000   # Batch size for inserting records during rebuild.
     rebuild_embedding_batch_size: 256   # Batch size for computing embeddings during rebuild.
+    # Optional: submit a Slurm batch job on another node to run the FastAPI memory server (Apptainer + uvicorn).
+    # Requires sbatch on the submit host; set enable=true, partition, and apptainer_sif for CentOS7 + Milvus Lite.
+    remote_slurm_launch:
+      enable: false
+      # VDB 监听端口（推荐显式设置）。若未设置且 env.memory.server_port>0 则用后者；否则远程默认 8765。
+      server_port: null
+      partition: "" # Slurm -p (required when enable=true)
+      account: null           # Slurm -A if needed
+      exclude_nodes: ""       # Slurm --exclude (comma-separated hostnames)
+      cpus_per_task: 4
+      mem: "64G"
+      time_limit: "02:00:00"  # Slurm -t
+      gres: null              # e.g. "gpu:0" if your site requires a GRES line
+      apptainer_sif: ""       # e.g. /path/to/glibc_ubuntu22.sif; empty = no container (node must have new glibc)
+      apptainer_binds: "/mnt:/mnt"
+      apptainer_nv: true
+      conda_sh: ""            # default: ~/miniconda3/etc/profile.d/conda.sh
+      conda_env: ""           # default: $CONDA_DEFAULT_ENV or verl-agent
+      repo_root: ""           # default: $MEMADAPTOR_REPO_ROOT or auto from package path
+      startup_timeout: 180    # seconds to wait for /health on the DB node
+      scancel_on_close: true  # cancel Slurm job when training driver exits (atexit)
+      sbatch_extra_lines: []  # extra #SBATCH lines (strings), e.g. module loads
     retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."   # Prompt suffix used in agentic retrieval mode.
     retrieval_query_open_tag: "<memory_retrieve>"   # Open tag for agentic retrieval queries.
     retrieval_query_close_tag: "</memory_retrieve>"   # Close tag for agentic retrieval queries.

@@ -27,6 +27,8 @@ install_requires = [
     "accelerate",
     "codetiming",
     "datasets",
+    "fastapi",
+    "uvicorn[standard]",
     "dill",
     "hydra-core",
     "numpy",
