@@ -15,6 +15,7 @@ from omegaconf import DictConfig, OmegaConf
 from collections import Counter
 
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor
 from verl.utils.dataset.rl_dataset import collate_fn
 
 
@@ -147,3 +148,17 @@ def prepare_adaptor_batch_for_rl(batch: DataProto, config: DictConfig) -> DataPr
     batch.meta_info["temperature"] = float(ref_rollout.temperature)
     batch.meta_info["multi_turn"] = False
     return batch
+
+
+def pad_mem_adaptor_batch_for_dp(batch: DataProto, world_size: int) -> tuple[DataProto, int]:
+    """
+    Pad adaptor batches so ``len(batch)`` is divisible by DP ``world_size`` (avoids DataProto.chunk assert).
+    Refreshes ``meta_info["global_token_num"]`` when padding adds rows. Returns ``(padded_or_same, pad_size)``.
+    """
+    ws = int(world_size)
+    if ws <= 1 or len(batch) == 0 or len(batch) % ws == 0:
+        return batch, 0
+    padded, pad_size = pad_dataproto_to_divisor(batch, ws)
+    if pad_size and padded.batch is not None and "attention_mask" in padded.batch:
+        padded.meta_info["global_token_num"] = torch.sum(padded.batch["attention_mask"], dim=-1).tolist()
+    return padded, pad_size

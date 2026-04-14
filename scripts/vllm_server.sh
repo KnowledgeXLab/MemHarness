@@ -2,6 +2,7 @@ HOSTNAME=$(hostname)
 IP=$(hostname -I | awk '{print $1}')
 
 echo "服务将在节点 $HOSTNAME ($IP) 上启动"
+export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 
 GPU_NUM=2
 

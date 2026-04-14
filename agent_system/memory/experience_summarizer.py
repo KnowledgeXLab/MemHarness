@@ -362,8 +362,10 @@ def _summarize_batch_self(
     actor_rollout_wg,
 ) -> List[str]:
     """Summarize trajectories using the actor rollout worker."""
-    max_prompt_length = int(config.data.max_prompt_length)
-    truncation = str(config.data["truncation"])
+    summ_max = OmegaConf.select(es, "summarizer_max_prompt_length", default=None)
+    max_prompt_length = int(config.data.max_prompt_length) if summ_max is None else int(summ_max)
+    summ_trunc = OmegaConf.select(es, "summarizer_prompt_truncation", default=None)
+    truncation = str(config.data["truncation"]) if summ_trunc is None else str(summ_trunc)
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         pad_id = tokenizer.eos_token_id

@@ -65,6 +65,7 @@ from gigpo import core_gigpo
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 from agent_system.memory.mem_adaptor_training import (
     build_memory_adaptor_grpo_batch,
+    pad_mem_adaptor_batch_for_dp,
     prepare_adaptor_batch_for_rl,
     scale_adaptor_grpo_advantages_by_traj_adaptor_steps,
     train_memory_adaptor_enabled,
@@ -1530,8 +1531,11 @@ class RayPPOTrainer:
                                         ma_batch.batch["attention_mask"], dim=-1
                                     ).tolist()
                                     with _timer("mem_adaptor_old_log_prob", timing_raw):
-                                        ma_olp = self.adaptor_rollout_wg.compute_log_prob(ma_batch)
-                                        ma_olp.batch.pop("entropys", None)
+                                        ma_ws = int(self.adaptor_rollout_wg.world_size)
+                                        ma_lp_in, ma_lp_pad = pad_mem_adaptor_batch_for_dp(ma_batch, ma_ws)
+                                        ma_olp_pad = self.adaptor_rollout_wg.compute_log_prob(ma_lp_in)
+                                        ma_olp_pad.batch.pop("entropys", None)
+                                        ma_olp = unpad_dataproto(ma_olp_pad, ma_lp_pad)
                                         ma_batch = ma_batch.union(ma_olp)
                                     ma_batch.batch["token_level_rewards"] = ma_batch.batch["token_level_scores"]
                                     norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
@@ -1561,7 +1565,9 @@ class RayPPOTrainer:
                                     )
                                     with _timer("mem_adaptor_update_policy", timing_raw):
                                         ma_batch.meta_info["multi_turn"] = False
-                                        ma_out = self.adaptor_rollout_wg.update_actor(ma_batch)
+                                        ma_ws = int(self.adaptor_rollout_wg.world_size)
+                                        ma_act_in, _ = pad_mem_adaptor_batch_for_dp(ma_batch, ma_ws)
+                                        ma_out = self.adaptor_rollout_wg.update_actor(ma_act_in)
                                     if ma_out.meta_info and "metrics" in ma_out.meta_info:
                                         ma_metrics = reduce_metrics(ma_out.meta_info["metrics"])
                                         for k, v in ma_metrics.items():

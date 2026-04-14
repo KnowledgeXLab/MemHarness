@@ -51,4 +51,8 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    #集群常见：节点/模块同时 export ROCR（ROCm）与 CUDA；verl Worker 在二者并存时会直接报错。
+    # 须在 runtime_env 里覆盖为空串（不能依赖上方 pop逻辑：那会因「已存在」而删掉我们的覆盖）。
+    runtime_env["env_vars"]["ROCR_VISIBLE_DEVICES"] = ""
+    runtime_env["env_vars"]["HIP_VISIBLE_DEVICES"] = ""
     return runtime_env
