@@ -395,7 +395,6 @@ env:
       exclude_nodes: ""       # Slurm --exclude (comma-separated hostnames)
       cpus_per_task: 4
       mem: "64G"
-      time_limit: "02:00:00"  # Slurm -t
       gres: null              # e.g. "gpu:0" if your site requires a GRES line
       apptainer_sif: ""       # e.g. /path/to/glibc_ubuntu22.sif; empty = no container (node must have new glibc)
       apptainer_binds: "/mnt:/mnt"
@@ -460,6 +459,9 @@ mem_adaptor:
   # Fine-grained adaptor schedule (optional). Global step = trainer global_step during rollout; env step = post-step episode length for that env.
   train_global_step_start: null   # inclusive; null = no lower bound
   train_global_step_end: null     # exclusive upper bound; null = unbounded
+  # Env-step window for running the adaptor (reduces training rows when memory only matters mid/late episode).
+  # Index = episode_lengths[i] AFTER the env step (1-based). Inclusive start, exclusive end.
+  # Example: max_steps=30 → env_step_end=31 runs adaptor on env steps 1..30; every_n=2 → steps 1,3,5,...
   env_step_start: null            # inclusive 1-based env step; null defaults to 1
   env_step_end: null              # exclusive; null = unbounded
   env_step_every_n: 1             # run adaptor only when (env_step - env_step_start) % n == 0
@@ -483,7 +485,7 @@ mem_adaptor:
   adapted_injection_prefix: "Adapted memory principle:\n"
   placeholder_old_state: "(none)"
   placeholder_old_principle: "(none)"
-  max_new_tokens: 256
+  max_new_tokens: 512
   max_prompt_chars: 12000
   do_sample: true
   temperature: 0.7

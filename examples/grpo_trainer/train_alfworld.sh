@@ -13,6 +13,11 @@ export WANDB_MODE="offline"
 trainer_n_gpus_per_node=6
 # mem_adaptor 专用池每节点 GPU 数（main_ppo 默认与 nnodes 同长度的 1 列表）
 mem_adaptor_gpus_per_node=2
+# mem_adaptor 环境步调度：与 ppo_trainer.yaml 中 mem_adaptor.env_step_* 一致（减小 early-step 调用、增厚训练样本）
+# start=1，end 为开区间（例如 max_steps=30 时用 31 表示允许第 30 步）；every_n=1 表示每步都可触发
+mem_adaptor_env_step_start=3
+mem_adaptor_env_step_end=31
+mem_adaptor_env_step_every_n=3
 GPU_NUM="${trainer_n_gpus_per_node}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +38,7 @@ TASK_NAME="alfworld"
 MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
-RETRIEVAL_MODE="agentic" # agentic | fixed
+RETRIEVAL_MODE="fixed" # agentic | fixed
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 EMBEDDING_API_KEY="DataFrontier_bge_m3"
@@ -41,6 +46,8 @@ EMBEDDING_API_KEY="DataFrontier_bge_m3"
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
+# 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-18"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -49,9 +56,9 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 # MEMORY_REBUILD_SOURCE_PATH=""
 
-EXPERIMENT_NAME="train_adaptor_only"
+EXPERIMENT_NAME="train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
-MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
+MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -124,6 +131,9 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
   if [ -n "${MEMORY_APPTAINER_SIF}" ]; then
     REMOTE_VDB_CLI+=(env.memory.remote_slurm_launch.apptainer_sif="${MEMORY_APPTAINER_SIF}")
   fi
+  if [ -n "${MEMORY_REMOTE_EXCLUDE_NODES}" ]; then
+    REMOTE_VDB_CLI+=(env.memory.remote_slurm_launch.exclude_nodes="${MEMORY_REMOTE_EXCLUDE_NODES}")
+  fi
 fi
 
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
@@ -171,6 +181,9 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       mem_adaptor.train_memory_adaptor=true \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
       mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
+      mem_adaptor.env_step_start="${mem_adaptor_env_step_start}" \
+      mem_adaptor.env_step_end="${mem_adaptor_env_step_end}" \
+      mem_adaptor.env_step_every_n="${mem_adaptor_env_step_every_n}" \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \
@@ -195,6 +208,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=False \
+      trainer.val_before_train=True \
       trainer.val_only=False \
       "$@"

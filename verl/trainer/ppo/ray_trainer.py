@@ -67,6 +67,7 @@ from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 from agent_system.memory.mem_adaptor_training import (
     build_memory_adaptor_grpo_batch,
     format_mem_adaptor_training_sample_for_log,
+    mem_adaptor_rollout_diag_metrics,
     pad_mem_adaptor_batch_for_dp,
     prepare_adaptor_batch_for_rl,
     scale_adaptor_grpo_advantages_by_traj_adaptor_steps,
@@ -1508,6 +1509,8 @@ class RayPPOTrainer:
                     if train_memory_adaptor_enabled(self.config):
                         buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []
                         metrics["mem_adaptor/training_samples_collected"] = float(len(buf))
+                        for _k, _v in mem_adaptor_rollout_diag_metrics(buf, batch).items():
+                            metrics[f"mem_adaptor/{_k}"] = float(_v)
                         if buf:
                             try:
                                 picked = random.choice(buf)

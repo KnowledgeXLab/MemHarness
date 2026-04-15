@@ -50,7 +50,6 @@ def start_memory_vdb_on_slurm_node(
 
     cpus = int(rl.get("cpus_per_task") or 4)
     mem = str(rl.get("mem") or "32G")
-    time_limit = str(rl.get("time_limit") or "02:00:00")
     account = rl.get("account")
     exclude_nodes = str(rl.get("exclude_nodes") or "").strip()
     gres = rl.get("gres")
@@ -125,10 +124,13 @@ def start_memory_vdb_on_slurm_node(
         "#SBATCH -n 1",
         f"#SBATCH --cpus-per-task={cpus}",
         f"#SBATCH --mem={mem}",
-        f"#SBATCH -t {time_limit}",
-        f"#SBATCH -o {memory_dir}/slurm_vdb-%j.out",
-        f"#SBATCH -e {memory_dir}/slurm_vdb-%j.err",
     ]
+    sbatch_lines.extend(
+        [
+            f"#SBATCH -o {memory_dir}/slurm_vdb-%j.out",
+            f"#SBATCH -e {memory_dir}/slurm_vdb-%j.err",
+        ]
+    )
     if account:
         sbatch_lines.append(f"#SBATCH -A {account}")
     if exclude_nodes:

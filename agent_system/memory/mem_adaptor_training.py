@@ -96,6 +96,75 @@ def format_mem_adaptor_training_sample_for_log(
     )
 
 
+def mem_adaptor_rollout_diag_metrics(
+    samples: List[Dict[str, Any]],
+    gen_batch_output: DataProto,
+) -> Dict[str, float]:
+    """Per-rollout diagnostics for adaptor training rows (same ``traj_uid`` / return as GRPO attach).
+
+    Uses ``gen_batch_output.non_tensor_batch`` ``traj_uid``, ``episode_rewards``, and
+    ``traj_episode_success`` (if present). Each adaptor sample must carry ``mem_adaptor_reject``
+    (single-call ``<EMPTY>``) when available.
+    """
+    empty = {
+        "mean_attached_return": 0.0,
+        "reject_rate": 0.0,
+        "nonempty_rate": 0.0,
+        "success_rate_when_applied": 0.0,
+        "success_rate_when_rejected": 0.0,
+    }
+    if not samples:
+        return empty
+
+    tu = gen_batch_output.non_tensor_batch.get("traj_uid")
+    if tu is None or len(tu) == 0:
+        return empty
+
+    er = gen_batch_output.non_tensor_batch.get("episode_rewards")
+    ts = gen_batch_output.non_tensor_batch.get("traj_episode_success")
+    uid_map: Dict[str, tuple[float, float]] = {}
+    n_rows = len(tu)
+    for i in range(n_rows):
+        uid = str(tu[i])
+        if uid in uid_map:
+            continue
+        r = (
+            float(np.asarray(er[i], dtype=np.float64).reshape(-1)[0])
+            if er is not None
+            else 0.0
+        )
+        if ts is not None:
+            s = float(np.asarray(ts[i], dtype=np.float64).reshape(-1)[0])
+        else:
+            s = 1.0 if r > 0.0 else 0.0
+        uid_map[uid] = (r, s)
+
+    returns: List[float] = []
+    reject_flags: List[float] = []
+    succ_when_applied: List[float] = []
+    succ_when_rejected: List[float] = []
+
+    for s in samples:
+        tid = str(s.get("traj_uid", ""))
+        r, succ = uid_map.get(tid, (0.0, 0.0))
+        returns.append(r)
+        rej = bool(s.get("mem_adaptor_reject", False))
+        reject_flags.append(1.0 if rej else 0.0)
+        if rej:
+            succ_when_rejected.append(succ)
+        else:
+            succ_when_applied.append(succ)
+
+    n = len(samples)
+    return {
+        "mean_attached_return": float(np.mean(returns)) if n else 0.0,
+        "reject_rate": float(np.mean(reject_flags)) if n else 0.0,
+        "nonempty_rate": float(1.0 - np.mean(reject_flags)) if n else 0.0,
+        "success_rate_when_applied": float(np.mean(succ_when_applied)) if succ_when_applied else 0.0,
+        "success_rate_when_rejected": float(np.mean(succ_when_rejected)) if succ_when_rejected else 0.0,
+    }
+
+
 def train_memory_adaptor_enabled(config: DictConfig) -> bool:
     """True when adaptor GRPO updates should run: enabled, dedicated WG, and ``train_memory_adaptor``."""
     ma = OmegaConf.select(config, "mem_adaptor")

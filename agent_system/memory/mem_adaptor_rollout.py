@@ -399,6 +399,7 @@ def maybe_apply_memory_adaptor(
 
     if adaptor_training_buffer is not None and n > 0 and traj_uid is not None:
         pad_tok = int(pad_token_id)
+        empty_markers = list(ma["empty_output_markers"])
         for k in range(n):
             env_i = row_env_indices[k]
             if env_i < 0 or env_i >= len(traj_uid):
@@ -407,6 +408,7 @@ def maybe_apply_memory_adaptor(
                 grpo_id = str(grpo_group_uid[env_i])
             else:
                 grpo_id = str(uuid.uuid4())
+            _, call_reject = _normalize_adaptor_output(str(dec[k]), empty_markers)
             rec: Dict[str, Any] = {
                 "prompts": out.batch["prompts"][k].detach().cpu().clone(),
                 "responses": out.batch["responses"][k].detach().cpu().clone(),
@@ -416,6 +418,7 @@ def maybe_apply_memory_adaptor(
                 "traj_uid": str(traj_uid[env_i]),
                 "grpo_index": grpo_id,
                 "pad_token_id": pad_tok,
+                "mem_adaptor_reject": bool(call_reject),
             }
             if "rollout_log_probs" in out.batch.keys():
                 rec["rollout_log_probs"] = out.batch["rollout_log_probs"][k].detach().cpu().clone()

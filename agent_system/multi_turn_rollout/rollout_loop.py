@@ -295,7 +295,15 @@ class TrajectoryCollector:
                     # memory_retrieval_counts (per trajectory; same value on every step row)
                     data['memory_retrieval_counts'] = memory_retrieval_counts[bs]
                     data['episode_gamefile'] = episode_gamefiles[bs]
-                    # success_rate
+                    # Per-trajectory task success (for diagnostics, e.g. mem_adaptor success rates).
+                    sr_per_traj = success.get("success_rate")
+                    if sr_per_traj is not None:
+                        data["traj_episode_success"] = float(
+                            np.asarray(sr_per_traj[bs], dtype=np.float64).reshape(-1)[0]
+                        )
+                    else:
+                        data["traj_episode_success"] = float(1.0 if episode_rewards[bs] > 0 else 0.0)
+                    # Batch-mean success metrics (legacy; same scalar on every row).
                     for key, value in success_rate.items():
                         data[key] = value
 
