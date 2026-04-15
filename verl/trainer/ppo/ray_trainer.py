@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import random
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -65,6 +66,7 @@ from gigpo import core_gigpo
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 from agent_system.memory.mem_adaptor_training import (
     build_memory_adaptor_grpo_batch,
+    format_mem_adaptor_training_sample_for_log,
     pad_mem_adaptor_batch_for_dp,
     prepare_adaptor_batch_for_rl,
     scale_adaptor_grpo_advantages_by_traj_adaptor_steps,
@@ -1504,6 +1506,23 @@ class RayPPOTrainer:
                     batch = adjust_batch(self.config, batch)
 
                     if train_memory_adaptor_enabled(self.config):
+                        buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []
+                        metrics["mem_adaptor/training_samples_collected"] = float(len(buf))
+                        if buf:
+                            try:
+                                picked = random.choice(buf)
+                                preview = format_mem_adaptor_training_sample_for_log(
+                                    picked, self.tokenizer
+                                )
+                                print(
+                                    f"[mem_adaptor] global_step={self.global_steps} "
+                                    f"random training sample (n={len(buf)}):\n{preview}"
+                                )
+                            except Exception as e:
+                                print(
+                                    f"[mem_adaptor] global_step={self.global_steps} "
+                                    f"random sample preview failed: {e}"
+                                )
                         if self.adaptor_rollout_wg is None:
                             print(
                                 "Warning: mem_adaptor training is active but adaptor_rollout_wg is None "
@@ -1515,7 +1534,6 @@ class RayPPOTrainer:
                                 f"got {self.config.algorithm.adv_estimator}; skipping adaptor policy update."
                             )
                         else:
-                            buf = getattr(self.traj_collector, "mem_adaptor_training_samples", None) or []
                             if buf:
                                 # Outcome signal: traj episode return on rollout batch (episode_rewards), not
                                 # Reasoning token_level_scores from reward_fn.

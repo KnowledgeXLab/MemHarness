@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
 
 from collections import Counter
 
@@ -57,6 +60,40 @@ def prune_mem_adaptor_training_samples_after_group_filter(
     del buf[buf_start:]
     keep = {str(x) for x in np.asarray(kept_traj_uid, dtype=object).reshape(-1)}
     buf.extend(s for s in new_chunk if str(s.get("traj_uid", "")) in keep)
+
+
+def format_mem_adaptor_training_sample_for_log(
+    sample: Dict[str, Any],
+    tokenizer: "PreTrainedTokenizer",
+    *,
+    max_prompt_chars: int = 800,
+    max_response_chars: int = 800,
+) -> str:
+    """Decode one adaptor GRPO training row (CPU prompt/response ids) for stdout / file logs."""
+
+    def _decode_ids(ids: Any) -> str:
+        if ids is None:
+            return ""
+        if hasattr(ids, "detach"):
+            ids = ids.detach().cpu()
+        try:
+            return tokenizer.decode(ids, skip_special_tokens=True).strip()
+        except Exception:
+            return "<decode_error>"
+
+    tu = str(sample.get("traj_uid", ""))
+    gi = str(sample.get("grpo_index", ""))
+    prompt = _decode_ids(sample.get("prompts"))
+    resp = _decode_ids(sample.get("responses"))
+    if len(prompt) > max_prompt_chars:
+        prompt = prompt[:max_prompt_chars] + "…"
+    if len(resp) > max_response_chars:
+        resp = resp[:max_response_chars] + "…"
+    return (
+        f"traj_uid={tu} grpo_index={gi}\n"
+        f"--- prompt (truncated to {max_prompt_chars} chars) ---\n{prompt}\n"
+        f"--- response (truncated to {max_response_chars} chars) ---\n{resp}"
+    )
 
 
 def train_memory_adaptor_enabled(config: DictConfig) -> bool:
