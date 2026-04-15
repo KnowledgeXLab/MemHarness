@@ -21,7 +21,7 @@ import urllib.request
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizer
 
-from agent_system.memory.memory_manager import MemoryManager, normalize_text, truncate_text
+from agent_system.memory.memory_manager import MemoryManager, normalize_text
 from agent_system.memory.types import MemoryRecord
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
@@ -96,19 +96,13 @@ Trajectory:
 """
 
 
-def _exps_cfg(config: DictConfig) -> DictConfig:
-    mc = OmegaConf.select(config, "env.memory.experience_summarizer")
-    return mc if mc is not None else OmegaConf.create({})
-
-
 def experience_summarizer_active(config: DictConfig) -> bool:
-    mem = OmegaConf.select(config, "env.memory")
-    if mem is None or not bool(mem.get("enabled", False)):
+    mem = config.env.memory
+    if not bool(mem.enabled):
         return False
-    if not bool(mem.get("write_back", False)):
+    if not bool(mem.write_back):
         return False
-    es = _exps_cfg(config)
-    mode = str(es.get("mode", "none") or "none").strip().lower()
+    mode = str(mem.experience_summarizer.mode).strip().lower()
     return mode in ("self", "teacher")
 
 
@@ -151,8 +145,6 @@ def _state_text_from_step(step: Dict[str, Any], tokenizer: PreTrainedTokenizer) 
 def _format_trajectory_plain(
     steps: List[Dict[str, Any]],
     tokenizer: PreTrainedTokenizer,
-    *,
-    max_chars: int,
 ) -> str:
     lines: List[str] = []
     for t, step in enumerate(steps):
@@ -169,7 +161,263 @@ def _format_trajectory_plain(
         if rew is not None:
             lines.append(f"Step reward: {rew}")
     body = "\n\n".join(lines)
-    return truncate_text(body, max_chars)
+    return body
+
+
+def _step_has_memory_retrieve(step: Dict[str, Any], tokenizer: PreTrainedTokenizer) -> bool:
+    blob = (_action_text_from_step(step, tokenizer) + "\n" + _state_text_from_step(step, tokenizer)).lower()
+    return "<memory_retrieve>" in blob or "</memory_retrieve>" in blob
+
+
+def _step_outputs_memory_retrieve(step: Dict[str, Any], tokenizer: PreTrainedTokenizer) -> bool:
+    return "<memory_retrieve>" in _action_text_from_step(step, tokenizer).lower()
+
+
+def _ordered_active_steps(steps: List[Dict[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+    return [(t, steps[t]) for t in range(len(steps)) if steps[t].get("active_masks", True)]
+
+
+def _select_ordered_steps_head_tail_protected(
+    ordered: List[Tuple[int, Dict[str, Any]]],
+    tokenizer: PreTrainedTokenizer,
+    episode_max_turns: int,
+    head_turns: int,
+    tail_turns: int,
+) -> tuple[List[Tuple[int, Dict[str, Any]]], dict[str, Any]]:
+    """Keep first/last turns when long; keep middle turns that touch memory retrieval (same idea as ``mem_fail_judge``)."""
+    n = len(ordered)
+    meta: dict[str, Any] = {
+        "total_turns": n,
+        "turns_included": n,
+        "omitted_middle_turns": 0,
+        "head_turns_kept": n,
+        "tail_turns_kept": n,
+        "truncated_by_turns": False,
+        "protected_memory_retrieve_positions": [],
+    }
+    if episode_max_turns <= 0 or n <= episode_max_turns:
+        return ordered, meta
+
+    h = max(0, head_turns)
+    t = max(0, tail_turns)
+    if h + t >= n:
+        return ordered, meta
+
+    keep_pos: set[int] = set(range(h)) | set(range(n - t, n))
+    protected_positions: list[int] = []
+    for i in range(h, n - t):
+        _, st = ordered[i]
+        if _step_has_memory_retrieve(st, tokenizer):
+            keep_pos.add(i)
+            protected_positions.append(i)
+    for i in range(n - 1):
+        if _step_outputs_memory_retrieve(ordered[i][1], tokenizer):
+            keep_pos.add(i + 1)
+
+    selected = [ordered[i] for i in sorted(keep_pos)]
+    omitted = n - len(selected)
+    meta["truncated_by_turns"] = omitted > 0
+    meta["turns_included"] = len(selected)
+    meta["omitted_middle_turns"] = omitted
+    meta["head_turns_kept"] = h
+    meta["tail_turns_kept"] = t
+    meta["protected_memory_retrieve_positions"] = protected_positions
+    return selected, meta
+
+
+def _format_ordered_steps_plain(
+    ordered: List[Tuple[int, Dict[str, Any]]],
+    tokenizer: PreTrainedTokenizer,
+    *,
+    coverage_preamble: str = "",
+) -> str:
+    lines: List[str] = []
+    if coverage_preamble.strip():
+        lines.append(coverage_preamble.strip())
+    for orig_i, step in ordered:
+        act = _action_text_from_step(step, tokenizer)
+        st = _state_text_from_step(step, tokenizer)
+        lines.append(f"--- Step {orig_i + 1} ---")
+        if st:
+            lines.append(f"Context (prompt):\n{st}")
+        if act:
+            lines.append(f"Action (model output):\n{act}")
+        rew = step.get("rewards")
+        if rew is not None:
+            lines.append(f"Step reward: {rew}")
+    body = "\n\n".join(lines)
+    return body
+
+
+def _protection_mask_ordered(ordered: List[Tuple[int, Dict[str, Any]]], tokenizer: PreTrainedTokenizer) -> List[bool]:
+    prot = [False] * len(ordered)
+    for i, (_, st) in enumerate(ordered):
+        if _step_has_memory_retrieve(st, tokenizer):
+            prot[i] = True
+    for i in range(len(ordered) - 1):
+        if _step_outputs_memory_retrieve(ordered[i][1], tokenizer):
+            prot[i + 1] = True
+    return prot
+
+
+def _count_summarizer_chat_tokens(
+    tokenizer: PreTrainedTokenizer,
+    system_prompt: str,
+    user_message: str,
+    apply_kw: Optional[dict],
+) -> int:
+    chat = _build_chat_prompt(tokenizer, system_prompt, user_message, apply_kw if isinstance(apply_kw, dict) else None)
+    return len(tokenizer.encode(chat, add_special_tokens=False))
+
+
+def _coverage_note_from_meta(meta: dict[str, Any], es: DictConfig) -> str:
+    if not bool(es.summarizer_trajectory_include_coverage_note):
+        return ""
+    if not meta["truncated_by_turns"]:
+        return ""
+    extra = ""
+    prot = meta["protected_memory_retrieve_positions"]
+    if prot:
+        extra = (
+            "Middle steps containing <memory_retrieve> are kept; protected ordered indices: "
+            f"{prot}. "
+        )
+    return (
+        "[Trajectory coverage] "
+        f"Total active steps: {meta['total_turns']}. "
+        f"Shown: first {meta['head_turns_kept']} and last {meta['tail_turns_kept']} steps plus protected retrieve-related steps; "
+        f"omitted from middle: {meta['omitted_middle_turns']}. "
+        f"{extra}\n\n"
+    )
+
+
+def _trim_ordered_steps_to_prompt_token_budget(
+    ordered: List[Tuple[int, Dict[str, Any]]],
+    *,
+    tokenizer: PreTrainedTokenizer,
+    system_prompt: str,
+    trajectory_user_prompt_template: str,
+    template_format_kwargs: Dict[str, Any],
+    apply_kw: Optional[dict],
+    max_prompt_tokens: int,
+    min_turns: int,
+    coverage_preamble: str,
+) -> Optional[str]:
+    """
+    Drop removable turns until the full chat fits ``max_prompt_tokens``.
+
+    **Alternating peel on the removable index set** (``rem`` = indices where ``prot[i]`` is false):
+
+    Example: after head/tail compression, 6 steps remain at indices ``0..5`` in time order.
+    Suppose only ``1`` and ``4`` are removable (others are retrieve-protected). Then
+    ``rem == [1, 4]``, ``max(rem)==4``, ``min(rem)==1``.
+
+    - Round 1 (``peel_right=True``): delete **rightmost** removable → drop index **4**.
+    - Round 2 (``peel_right=False``): delete **leftmost** removable among what remains → drop index **1**
+      (same physical turn “slot” as before renumbering; list shortens so indices shift).
+
+    Recompute ``rem`` each iteration. If the next removable set were ``[0,2,3,5]``, the same rule applies:
+    alternate **``max(rem)``** and **``min(rem)``**. Intuition: peel one layer from the **late** side, then one
+    from the **early** side, so you do not delete only the end or only the beginning.
+    """
+    cur: List[Tuple[int, Dict[str, Any]]] = list(ordered)
+    if len(cur) < min_turns:
+        return None
+    peel_right = True
+    # At most one turn removed per iteration until len(cur)==min_turns or prompt fits; +1 for final "fits" check; +8 slack.
+    max_iters = max(len(cur) - min_turns + 1, 1) + 8
+    for _ in range(max_iters):
+        prot = _protection_mask_ordered(cur, tokenizer)
+        plain = _format_ordered_steps_plain(cur, tokenizer, coverage_preamble=coverage_preamble)
+        if not plain.strip():
+            return None
+        try:
+            user_msg = trajectory_user_prompt_template.format(**{**template_format_kwargs, "trajectory_text": plain})
+        except KeyError as e:
+            logger.warning("experience_summarizer: template format failed during trim: %s", e)
+            return None
+        ntok = _count_summarizer_chat_tokens(tokenizer, system_prompt, user_msg, apply_kw)
+        if ntok <= max_prompt_tokens:
+            return plain
+        rem = [i for i in range(len(cur)) if not prot[i]]
+        if not rem:
+            logger.warning(
+                "experience_summarizer: chat still ~%s tokens (> budget %s) but all turns are retrieve-protected; skip.",
+                ntok,
+                max_prompt_tokens,
+            )
+            return None
+        if len(cur) <= min_turns:
+            logger.warning(
+                "experience_summarizer: chat ~%s tokens exceeds budget %s at min_turns=%s; skip trajectory.",
+                ntok,
+                max_prompt_tokens,
+                min_turns,
+            )
+            return None
+        drop_i = max(rem) if peel_right else min(rem)
+        peel_right = not peel_right
+        del cur[drop_i]
+
+    logger.warning("experience_summarizer: token trim exceeded iteration safety; skip.")
+    return None
+
+
+def _prepare_trajectory_text_for_summarizer(
+    steps: List[Dict[str, Any]],
+    tokenizer: PreTrainedTokenizer,
+    config: DictConfig,
+    es: DictConfig,
+    *,
+    trajectory_user_prompt_template: str,
+    template_format_kwargs: Dict[str, Any],
+    system_prompt: str,
+    apply_kw: Optional[dict],
+) -> Optional[str]:
+    """
+    Build trajectory plaintext for summarizer: optional head/tail + protected retrieve, then optional turn-level
+    trimming to satisfy summarizer token budget (full chat = system + user template).
+    """
+    if not bool(es.summarizer_trajectory_structural_compress):
+        plain = _format_trajectory_plain(steps, tokenizer)
+        return plain if plain.strip() else None
+
+    ordered = _ordered_active_steps(steps)
+    if not ordered:
+        return None
+
+    ep_max = int(es.summarizer_trajectory_episode_max_turns)
+    head_n = int(es.summarizer_trajectory_head_turns)
+    tail_n = int(es.summarizer_trajectory_tail_turns)
+    selected, meta = _select_ordered_steps_head_tail_protected(ordered, tokenizer, ep_max, head_n, tail_n)
+
+    min_turns = max(1, int(es.summarizer_trajectory_min_turns_kept))
+    if len(selected) < min_turns:
+        logger.warning(
+            "experience_summarizer: after head/tail selection only %s turns (< min_turns=%s); skip.",
+            len(selected),
+            min_turns,
+        )
+        return None
+
+    coverage = _coverage_note_from_meta(meta, es)
+    budget = _vllm_rollout_max_prompt_tokens(config)
+
+    if bool(es.summarizer_trajectory_token_trim):
+        return _trim_ordered_steps_to_prompt_token_budget(
+            selected,
+            tokenizer=tokenizer,
+            system_prompt=system_prompt,
+            trajectory_user_prompt_template=trajectory_user_prompt_template,
+            template_format_kwargs=template_format_kwargs,
+            apply_kw=apply_kw,
+            max_prompt_tokens=budget,
+            min_turns=min_turns,
+            coverage_preamble=coverage,
+        )
+
+    plain = _format_ordered_steps_plain(selected, tokenizer, coverage_preamble=coverage)
+    return plain if plain.strip() else None
 
 
 def _episode_success(success: Dict[str, np.ndarray], index: int) -> bool:
@@ -199,15 +447,14 @@ def _dataset_item_id_from_infos(total_infos: List[List[Dict[str, Any]]], env_ind
 
 
 def _resolve_trajectory_user_prompt_template(es: DictConfig) -> str:
-    t = es.get("trajectory_user_prompt_template")
-    if t is not None and str(t).strip():
+    t = es.trajectory_user_prompt_template
+    if str(t).strip():
         return str(t)
     return ""
 
 
 def _resolve_system_prompt(es: DictConfig) -> str:
-    raw = es.get("system_prompt")
-    s = str(raw).strip() if raw is not None else ""
+    s = str(es.system_prompt).strip()
     return s if s else DEFAULT_JSON_SYSTEM_PROMPT
 
 
@@ -269,14 +516,18 @@ def _http_chat_completion(url: str, headers: Dict[str, str], payload: dict, time
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="replace")[:800]
         raise RuntimeError(f"Chat API HTTP {e.code}: {err}") from e
-    choices = body.get("choices") or []
-    if not choices:
+    if not isinstance(body, dict) or "choices" not in body:
         return ""
-    msg = choices[0].get("message") or {}
-    content = msg.get("content")
-    if content is None:
+    choices = body["choices"]
+    if not isinstance(choices, list) or not choices:
         return ""
-    return str(content).strip()
+    ch0 = choices[0]
+    if not isinstance(ch0, dict) or "message" not in ch0:
+        return ""
+    msg = ch0["message"]
+    if not isinstance(msg, dict) or "content" not in msg or msg["content"] is None:
+        return ""
+    return str(msg["content"]).strip()
 
 
 def _summarize_batch_teacher(
@@ -287,23 +538,22 @@ def _summarize_batch_teacher(
 ) -> List[str]:
     """Summarize trajectories using the teacher HTTP API."""
 
-    base_url = str(oa["base_url"])
+    base_url = str(oa.base_url)
     url = _normalize_chat_url(base_url)
-    api_key = str(oa["api_key"])
+    api_key = str(oa.api_key)
     if not api_key:
         raise ValueError(
             "env.memory.experience_summarizer.openai_api.api_key is empty; set it or OPENAI_API_KEY."
         )
-    model = str(oa["model"])
-    timeout = float(oa["timeout_sec"])
-    max_tokens = int(oa["max_tokens"])
-    temperature = float(oa["temperature"])
-    max_concurrent = int(oa["max_concurrent"])
-    max_retries = int(oa["max_retries"])
-    retry_backoff = float(oa["retry_backoff_sec"])
-    use_json_response = bool(oa.get("response_format_json", False))
-    extra = oa["extra_headers"]
-    extra_headers: Dict[str, str] = dict(OmegaConf.to_container(extra, resolve=True)) if extra else {}
+    model = str(oa.model)
+    timeout = float(oa.timeout_sec)
+    max_tokens = int(oa.max_tokens)
+    temperature = float(oa.temperature)
+    max_concurrent = int(oa.max_concurrent)
+    max_retries = int(oa.max_retries)
+    retry_backoff = float(oa.retry_backoff_sec)
+    use_json_response = bool(oa.response_format_json)
+    extra_headers: Dict[str, str] = dict(OmegaConf.to_container(oa.extra_headers, resolve=True) or {})
 
     headers = {
         "Content-Type": "application/json",
@@ -353,6 +603,24 @@ def _summarize_batch_teacher(
     return [x or "" for x in out]
 
 
+def _vllm_rollout_max_prompt_tokens(config: DictConfig) -> int:
+    """
+    Max prompt tokens that fit in the Reasoning actor's vLLM engine (``max_model_len - response_length``,
+    same rule as vllm_rollout_spmd). Self-mode summarizer tokenization uses this cap; turn-level trim
+    targets the same budget so the full chat usually fits without post-hoc truncation.
+    """
+    ro = OmegaConf.select(config, "actor_rollout_ref.rollout")
+    if ro is None:
+        return max(1, int(config.data.max_prompt_length))
+    mml_cfg = ro.max_model_len
+    if mml_cfg is None:
+        mml = int(ro.prompt_length) + int(ro.response_length)
+    else:
+        mml = int(mml_cfg)
+    roll_resp = int(ro.response_length)
+    return max(1, mml - roll_resp)
+
+
 def _summarize_batch_self(
     *,
     prompts: List[str],
@@ -362,10 +630,10 @@ def _summarize_batch_self(
     actor_rollout_wg,
 ) -> List[str]:
     """Summarize trajectories using the actor rollout worker."""
-    summ_max = OmegaConf.select(es, "summarizer_max_prompt_length", default=None)
-    max_prompt_length = int(config.data.max_prompt_length) if summ_max is None else int(summ_max)
-    summ_trunc = OmegaConf.select(es, "summarizer_prompt_truncation", default=None)
-    truncation = str(config.data["truncation"]) if summ_trunc is None else str(summ_trunc)
+    max_prompt_length = _vllm_rollout_max_prompt_tokens(config)
+    truncation = "right"
+    ro = OmegaConf.select(config, "actor_rollout_ref.rollout")
+    response_length = int(ro.response_length) if ro is not None else int(config.data.max_response_length)
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
@@ -375,11 +643,11 @@ def _summarize_batch_self(
         "eos_token_id": tokenizer.eos_token_id,
         "pad_token_id": int(pad_id),
         "recompute_log_prob": False,
-        "do_sample": bool(es["do_sample"]),
+        "do_sample": bool(es.do_sample),
         "validate": False,
-        "response_length": int(es["max_new_tokens"]),
-        "temperature": float(es["temperature"]),
-        "top_p": float(es["top_p"]),
+        "response_length": response_length,
+        "temperature": float(es.temperature),
+        "top_p": float(es.top_p),
     }
     dp = DataProto.from_single_dict(data=data, meta_info=meta)
     pad_size = 0
@@ -407,7 +675,9 @@ def _parse_memories_from_model_output(raw: str) -> list[dict[str, Any]]:
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("experience_summarizer: JSON parse failed: %s", e)
         return []
-    memories = obj.get("memories")
+    if "memories" not in obj:
+        return []
+    memories = obj["memories"]
     if not isinstance(memories, list):
         return []
     return [m for m in memories if isinstance(m, dict)]
@@ -416,7 +686,7 @@ def _parse_memories_from_model_output(raw: str) -> list[dict[str, Any]]:
 def _memory_records_from_extractor_output(
     raw: str,
     *,
-    pending: Tuple[int, str, float, bool, str, Any],
+    pending: Tuple[int, str, float, bool, str, int, Any],
     task_name: str,
     mode: str,
     model_label: str,
@@ -426,7 +696,7 @@ def _memory_records_from_extractor_output(
     max_memory_chars: int,
 ) -> list[MemoryRecord]:
     """Parse one trajectory's model output and return records that pass field validation."""
-    env_index, traj_s, r, succ, traj_plain, dataset_item_id = pending
+    env_index, traj_s, r, succ, traj_plain_for_llm, traj_chars_full, dataset_item_id = pending
     memories = _parse_memories_from_model_output(raw)[:max_pairs]
     out: list[MemoryRecord] = []
     for midx, mem_obj in enumerate(memories):
@@ -440,7 +710,8 @@ def _memory_records_from_extractor_output(
             episode_reward=r,
             episode_success=succ,
             mode=mode,
-            trajectory_char_len=len(traj_plain),
+            trajectory_chars_for_prompt=len(traj_plain_for_llm),
+            trajectory_chars_full=traj_chars_full,
             extractor_model_label=model_label,
             max_state_chars=max_state_chars,
             max_action_chars=max_action_chars,
@@ -501,6 +772,66 @@ def _run_extraction_inference_for_indices(
     raise ValueError(f"unsupported mode={mode}")
 
 
+def _raw_trajectory_fallback_memory_record(
+    *,
+    task_name: str,
+    trajectory_index: int,
+    dataset_item_id: Any,
+    source_episode_id: str,
+    episode_reward: float,
+    episode_success: bool,
+    traj_full_plain: str,
+    mode: str,
+    model_label: str,
+    max_state_chars: int,
+    max_action_chars: int,
+    max_memory_chars: int,
+    fallback_reason: str,
+) -> MemoryRecord:
+    """Build a MemoryRecord that embeds (truncated) trajectory text for vector store ingest.
+
+    Not used by ``maybe_summarize_and_write_experiences`` by default (full trajectories are not written to avoid
+    store bloat). Kept for a future archival path (e.g. external files or a dedicated collection).
+    """
+    now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    meta = {
+        "dataset_item_id": dataset_item_id,
+        "trajectory_index": trajectory_index,
+        "memory_index_within_trajectory": 0,
+        "extracted_by": model_label,
+        "source": "experience_summarizer",
+        "mode": mode,
+        "experience_writeback_kind": "raw_trajectory_fallback",
+        "fallback_reason": fallback_reason,
+        "trajectory_chars": len(traj_full_plain),
+        "trajectory_chars_for_prompt": 0,
+        "trajectory_chars_full": len(traj_full_plain),
+    }
+    st = normalize_text("[raw_trajectory_fallback]", max_chars=max_state_chars)
+    at = normalize_text(source_episode_id, max_chars=max_action_chars)
+    mt = normalize_text(traj_full_plain, max_chars=max_memory_chars)
+    return MemoryRecord(
+        memory_id=str(uuid.uuid4()),
+        task_name=task_name,
+        item_id=int(trajectory_index),
+        source_episode_id=source_episode_id,
+        source_step=0,
+        state_text=st,
+        action_text=at,
+        memory_text=mt,
+        reward=float(episode_reward),
+        success=bool(episode_success),
+        created_step=None,
+        created_at=now_ts,
+        retrieval_count=0,
+        last_used_step=None,
+        metadata=meta,
+        value=None,
+        value_source=None,
+        value_update_step=None,
+    )
+
+
 def _memory_record_from_extracted_dict(
     *,
     memory: dict[str, Any],
@@ -512,36 +843,46 @@ def _memory_record_from_extracted_dict(
     episode_reward: float,
     episode_success: bool,
     mode: str,
-    trajectory_char_len: int,
+    trajectory_chars_for_prompt: int,
+    trajectory_chars_full: int,
     extractor_model_label: str,
     max_state_chars: int,
     max_action_chars: int,
     max_memory_chars: int,
 ) -> MemoryRecord | None:
-    state_text = normalize_text(str(memory.get("state_text") or ""), max_chars=max_state_chars)
-    action_text = normalize_text(str(memory.get("action_text") or ""), max_chars=max_action_chars)
-    memory_text = normalize_text(str(memory.get("memory_text") or ""), max_chars=max_memory_chars)
+    st_raw = memory["state_text"] if "state_text" in memory and memory["state_text"] is not None else ""
+    at_raw = memory["action_text"] if "action_text" in memory and memory["action_text"] is not None else ""
+    mt_raw = memory["memory_text"] if "memory_text" in memory and memory["memory_text"] is not None else ""
+    state_text = normalize_text(str(st_raw), max_chars=max_state_chars)
+    action_text = normalize_text(str(at_raw), max_chars=max_action_chars)
+    memory_text = normalize_text(str(mt_raw), max_chars=max_memory_chars)
     if not state_text or not action_text or not memory_text:
         return None
 
-    metadata = memory.get("metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {"raw_metadata": metadata}
+    if "metadata" in memory and isinstance(memory["metadata"], dict):
+        metadata = dict(memory["metadata"])
+    elif "metadata" in memory:
+        metadata = {"raw_metadata": memory["metadata"]}
+    else:
+        metadata = {}
     metadata = {
         **metadata,
         "dataset_item_id": dataset_item_id,
         "trajectory_index": trajectory_index,
         "memory_index_within_trajectory": memory_idx,
         "extracted_by": extractor_model_label,
+        "experience_writeback_kind": "llm_extracted",
     }
 
-    source_step = memory.get("source_step", memory_idx + 1)
-    try:
-        source_step = int(source_step)
-    except (TypeError, ValueError):
+    if "source_step" in memory and memory["source_step"] is not None:
+        try:
+            source_step = int(memory["source_step"])
+        except (TypeError, ValueError):
+            source_step = memory_idx + 1
+    else:
         source_step = memory_idx + 1
 
-    value = memory.get("value", None)
+    value = memory["value"] if "value" in memory else None
     if value is not None:
         try:
             value = float(value)
@@ -568,7 +909,9 @@ def _memory_record_from_extracted_dict(
             **metadata,
             "source": "experience_summarizer",
             "mode": mode,
-            "trajectory_chars": trajectory_char_len,
+            "trajectory_chars": trajectory_chars_for_prompt,
+            "trajectory_chars_for_prompt": trajectory_chars_for_prompt,
+            "trajectory_chars_full": trajectory_chars_full,
         },
         value=value,
         value_source="llm_extraction" if value is not None else None,
@@ -597,6 +940,9 @@ def maybe_summarize_and_write_experiences(
     The model response must be parseable as JSON with a ``memories`` array (see ``scripts/extract_memory_records.py``).
     If parsing yields no memories or every item fails validation, the same trajectory is inferred again until
     ``parse_max_attempts`` is reached (per trajectory).
+
+    Episodes with no summarizer prompt after prepare are skipped (no vector insert). Full-trajectory archival is
+    left to a future path; see ``_raw_trajectory_fallback_memory_record`` for a possible row shape.
     """
     if not experience_summarizer_active(config):
         return 0
@@ -606,23 +952,31 @@ def maybe_summarize_and_write_experiences(
         return 0
 
     mem = config.env.memory
-    es = _exps_cfg(config)
-    mode = str(es["mode"]).strip().lower()
+    es = mem.experience_summarizer
+    mode = str(es.mode).strip().lower()
+    model_label = str(es.extractor_model_label)
+    oa: DictConfig | None = None
+    if mode == "teacher":
+        oa = es.openai_api
+        model_label = str(oa.model)
     only_pos = bool(mem.only_store_positive_reward)
     max_pairs = max(1, int(mem.max_pairs_per_episode))
-    max_traj_chars = int(es["max_trajectory_chars"])
-    num_mem_cfg = int(es["num_memories_per_trajectory"])
+    num_mem_cfg = int(es.num_memories_per_trajectory)
     num_memories_cap = max(1, min(num_mem_cfg, max_pairs))
-    summarization_batch_size = int(es["summarization_batch_size"])
+    summarization_batch_size = int(es.summarization_batch_size)
     system_prompt = _resolve_system_prompt(es)
     trajectory_user_prompt_template = _resolve_trajectory_user_prompt_template(es)
     if not trajectory_user_prompt_template.strip():
         trajectory_user_prompt_template = DEFAULT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE
     apply_kw = OmegaConf.to_container(config.data["apply_chat_template_kwargs"], resolve=True) or {}
 
+    max_state = int(mem.max_state_chars)
+    max_act = int(mem.max_action_chars)
+    max_mem = int(mem.max_memory_chars)
+
     batch_size = len(total_batch_list)
     trajectory_user_messages: List[str] = []
-    pending_rollouts: List[Tuple[int, str, float, bool, str, Any]] = []
+    pending_rollouts: List[Tuple[int, str, float, bool, str, int, Any]] = []
 
     for i in range(batch_size):
         steps = total_batch_list[i]
@@ -633,41 +987,53 @@ def maybe_summarize_and_write_experiences(
             continue
         succ = _episode_success(success, i)
         traj_s = str(traj_uid[i])
-        traj_plain = _format_trajectory_plain(steps, tokenizer, max_chars=max_traj_chars)
-        if not traj_plain.strip():
-            continue
         dataset_item_id = _dataset_item_id_from_infos(total_infos, i)
         ep_len = float(episode_lengths[i]) if i < len(episode_lengths) else 0.0
+        fmt_base = {
+            "num_memories": num_memories_cap,
+            "task_name": rm.task_name,
+            "dataset_item_id": dataset_item_id,
+            "trajectory_index": int(i),
+            "episode_reward": r,
+            "episode_length": ep_len,
+            "traj_uid": traj_s,
+            "success": int(succ),
+        }
+        traj_full_plain = _format_trajectory_plain(steps, tokenizer)
+        traj_for_llm = _prepare_trajectory_text_for_summarizer(
+            steps,
+            tokenizer,
+            config,
+            es,
+            trajectory_user_prompt_template=trajectory_user_prompt_template,
+            template_format_kwargs=fmt_base,
+            system_prompt=system_prompt,
+            apply_kw=apply_kw if isinstance(apply_kw, dict) else None,
+        )
+        if not traj_for_llm or not traj_for_llm.strip():
+            if traj_full_plain.strip():
+                logger.info(
+                    "experience_summarizer: env %s has no summarizer prompt after prepare; skip (no full-trajectory insert).",
+                    i,
+                )
+            continue
         try:
             user_message = trajectory_user_prompt_template.format(
-                num_memories=num_memories_cap,
-                task_name=rm.task_name,
-                dataset_item_id=dataset_item_id,
-                trajectory_index=int(i),
-                trajectory_text=traj_plain,
-                episode_reward=r,
-                episode_length=ep_len,
-                traj_uid=traj_s,
-                success=int(succ),
+                trajectory_text=traj_for_llm,
+                **fmt_base,
             )
         except KeyError as e:
             logger.warning("experience_summarizer: template placeholder missing: %s; skip env %s.", e, i)
             continue
         trajectory_user_messages.append(user_message)
-        pending_rollouts.append((i, traj_s, r, succ, traj_plain, dataset_item_id))
+        pending_rollouts.append((i, traj_s, r, succ, traj_for_llm, len(traj_full_plain), dataset_item_id))
 
     if not trajectory_user_messages:
         return 0
     if mode not in ("self", "teacher"):
         raise ValueError(f"unsupported mode={mode}")
 
-    model_label = str(es["extractor_model_label"])
-    oa: DictConfig | None = None
-    if mode == "teacher":
-        oa = es["openai_api"]
-        model_label = str(oa["model"])
-
-    parse_max_attempts = max(1, int(es["parse_max_attempts"]))
+    parse_max_attempts = max(1, int(es.parse_max_attempts))
 
     n_pending = len(trajectory_user_messages)
     raw_outputs: List[str] = [""] * n_pending
@@ -685,10 +1051,6 @@ def maybe_summarize_and_write_experiences(
             )
             for user_msg in trajectory_user_messages
         ]
-
-    max_state = int(mem.max_state_chars)
-    max_act = int(mem.max_action_chars)
-    max_mem = int(mem.max_memory_chars)
 
     try:
         while active:
@@ -749,19 +1111,18 @@ def maybe_summarize_and_write_experiences(
 
     records: List[MemoryRecord] = []
     for idx in range(n_pending):
-        records.extend(
-            _memory_records_from_extractor_output(
-                raw_outputs[idx],
-                pending=pending_rollouts[idx],
-                task_name=rm.task_name,
-                mode=mode,
-                model_label=model_label,
-                max_pairs=max_pairs,
-                max_state_chars=max_state,
-                max_action_chars=max_act,
-                max_memory_chars=max_mem,
-            )
+        recs = _memory_records_from_extractor_output(
+            raw_outputs[idx],
+            pending=pending_rollouts[idx],
+            task_name=rm.task_name,
+            mode=mode,
+            model_label=model_label,
+            max_pairs=max_pairs,
+            max_state_chars=max_state,
+            max_action_chars=max_act,
+            max_memory_chars=max_mem,
         )
+        records.extend(recs)
 
     if not records:
         return 0

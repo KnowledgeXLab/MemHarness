@@ -313,7 +313,7 @@ trainer:
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
   # Ray Object Store (Plasma) cap in bytes. 68719476736 = 128 GiB. Lowers default huge RAM use on large machines.
-  object_store_memory: 137438953472
+  # object_store_memory: 137438953472 # 128G
 
 env:
   env_name: alfworld/AlfredTWEnv
@@ -341,12 +341,14 @@ env:
       extractor_model_label: online_rollout # optional label stored in record metadata (teacher defaults to openai_api.model).
       system_prompt: "" # empty -> built-in JSON extraction system prompt
       trajectory_user_prompt_template: "" # empty -> built-in template (same schema as extract_memory_records.py)
-      max_trajectory_chars: 32768
-      # Token cap for self-mode summarization only. null -> use data.max_prompt_length.
-      summarizer_max_prompt_length: 32768
-      # Truncation for self-mode tokenization only. null -> use data.truncation (set e.g. right if data.truncation is error).
-      summarizer_prompt_truncation: right
-      max_new_tokens: 4096
+      # Long-episode compress for write-back summarization (head+tail+protect <memory_retrieve>, then turn-level trim to token budget).
+      summarizer_trajectory_structural_compress: false
+      summarizer_trajectory_episode_max_turns: 50
+      summarizer_trajectory_head_turns: 10
+      summarizer_trajectory_tail_turns: 10
+      summarizer_trajectory_min_turns_kept: 8
+      summarizer_trajectory_token_trim: true
+      summarizer_trajectory_include_coverage_note: true
       temperature: 0.6
       top_p: 1.0
       do_sample: false

@@ -70,10 +70,10 @@ LOG_FILE="${EXP_DIR}/train_alfworld-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
-# 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配；可先改小做冒烟
-train_data_size=36
+# 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
+train_data_size=18
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
-group_size=8
+group_size=4
 max_concurrent=32
 
 # TP 与 GPU 数一致（单卡训练请保持1）
@@ -133,7 +133,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=2048 \
+      data.max_prompt_length=8192 \
       data.max_response_length=512 \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
