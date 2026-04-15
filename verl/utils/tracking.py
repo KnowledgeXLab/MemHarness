@@ -16,10 +16,29 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import importlib.metadata
 from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union
+
+_WANDB_IMPORTLIB_METADATA_PATCHED = False
+
+
+def _patch_importlib_metadata_for_wandb() -> None:
+    """Avoid wandb.init crash when a broken install yields Distribution.metadata is None (e.g. wandb 0.23.x)."""
+    global _WANDB_IMPORTLIB_METADATA_PATCHED
+    if _WANDB_IMPORTLIB_METADATA_PATCHED:
+        return
+    orig = importlib.metadata.distributions
+
+    def distributions(**kwargs):
+        for d in orig(**kwargs):
+            if getattr(d, "metadata", None) is not None:
+                yield d
+
+    importlib.metadata.distributions = distributions  # type: ignore[method-assign]
+    _WANDB_IMPORTLIB_METADATA_PATCHED = True
 
 
 class Tracking:
@@ -49,6 +68,7 @@ class Tracking:
         self.logger = {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
+            _patch_importlib_metadata_for_wandb()
             import wandb
 
             wandb.init(project=project_name, name=experiment_name, config=config)
@@ -95,6 +115,7 @@ class Tracking:
         if "vemlp_wandb" in default_backend:
             import os
 
+            _patch_importlib_metadata_for_wandb()
             import volcengine_ml_platform
             from volcengine_ml_platform import wandb as vemlp_wandb
 

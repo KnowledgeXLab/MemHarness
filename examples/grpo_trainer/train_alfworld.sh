@@ -50,7 +50,7 @@ MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memor
 # MEMORY_REBUILD_SOURCE_PATH=""
 
 EXPERIMENT_NAME="train_adaptor_only"
-EXPERIMENTS_ROOT="data/MemAdaptor/exp_results/pre_exp_train"
+EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 

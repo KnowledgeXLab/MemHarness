@@ -1,4 +1,6 @@
 # requirements.txt records the full set of dependencies for development
+# setuptools>=82 removes pkg_resources (breaks milvus_lite). vLLM pins setuptools<80 on py>=3.12.
+setuptools>=77.0.3,<80
 accelerate
 codetiming
 datasets
