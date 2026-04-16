@@ -71,6 +71,17 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
             ref.actor.trainable = train_ma
             if train_ma:
                 ref.actor.use_kl_loss = False
+        # Dedicated adaptor WG must run hf/vllm for FSDP log-prob / vLLM generate; do not inherit openai_api.
+        with open_dict(ref.rollout):
+            if str(ref.rollout.name) == "openai_api":
+                local_rn = OmegaConf.select(ma, "local_rollout_name") or "vllm"
+                local_rn = str(local_rn).strip().lower()
+                if local_rn not in ("vllm", "hf"):
+                    raise ValueError(
+                        "mem_adaptor.local_rollout_name must be 'vllm' or 'hf' when the main policy uses "
+                        f"rollout.name=openai_api, got {local_rn!r}"
+                    )
+                ref.rollout.name = local_rn
     with open_dict(config.mem_adaptor):
         config.mem_adaptor.actor_rollout_ref = ref
 

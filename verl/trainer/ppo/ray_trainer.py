@@ -77,6 +77,16 @@ from agent_system.memory.mem_adaptor_training import (
 WorkerType = Type[Worker]
 
 
+def _frozen_openai_api_reasoning_policy(config) -> bool:
+    """Main rollout is OpenAI-compatible HTTP and the policy actor is frozen (not trainable)."""
+    if str(OmegaConf.select(config, "actor_rollout_ref.rollout.name") or "") != "openai_api":
+        return False
+    trainable = OmegaConf.select(config, "actor_rollout_ref.actor.trainable")
+    if trainable is None:
+        return False
+    return not bool(trainable)
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -1624,15 +1634,39 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
+                        if _frozen_openai_api_reasoning_policy(self.config):
+                            # API generation does not populate token-level responses aligned with local FSDP; skip log-prob.
+                            responses = batch.batch["responses"]
+                            z = torch.zeros(
+                                responses.shape[0],
+                                responses.shape[1],
+                                dtype=torch.float32,
+                                device=responses.device,
+                            )
+                            entropys = z
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_loss = agg_loss(
+                                loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                            )
+                            metrics["actor/entropy_loss"] = entropy_loss.detach().item()
+                            lp_proto = DataProto.from_dict(
+                                tensors={"old_log_probs": z},
+                                meta_info={"temperature": self.config.actor_rollout_ref.rollout.temperature},
+                            )
+                            batch = batch.union(lp_proto)
+                        else:
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            entropys = old_log_prob.batch["entropys"]
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_loss = agg_loss(
+                                loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                            )
+                            old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
+                            metrics.update(old_log_prob_metrics)
+                            old_log_prob.batch.pop("entropys")
+                            batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
@@ -1661,11 +1695,17 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            if not self.ref_in_actor:
+                            if _frozen_openai_api_reasoning_policy(self.config):
+                                ref_lp = DataProto.from_dict(
+                                    tensors={"ref_log_prob": batch.batch["old_log_probs"].clone()},
+                                )
+                                batch = batch.union(ref_lp)
+                            elif not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                                batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:

@@ -151,11 +151,11 @@ actor_rollout_ref:
       temperature: 0
       n: 1
       do_sample: False # default eager for validation
-    # Closed-model eval: set rollout.name to openai_api and tensor_model_parallel_size to 1.
+    # Closed-model / 外部 Chat API：rollout.name=openai_api，tensor_model_parallel_size=1；base_url/model/api 在训练脚本或环境中填写
     openai_api:
-      base_url: http://35.220.164.252:3888/v1/
+      base_url: ""
       api_key: ${oc.env:OPENAI_API_KEY,}
-      model: gpt-4.1-nano
+      model: ""
       max_concurrent: 8
       timeout_sec: 120
       max_retries: 2
@@ -335,6 +335,9 @@ env:
     # Whole-trajectory summarization then VDB insert (requires write_back=true, mode=self|teacher).
     experience_summarizer:
       mode: none   # none | self (actor_rollout_wg.generate_sequences) | teacher (OpenAI-compatible HTTP)
+      # full: JSON with state_text, action_text, memory_text, optional metadata (strong models / GPT-style offline extract).
+      # compact: model outputs only memory_text (+ optional source_step); state/action filled from trajectory (weak self-distill).
+      schema: full
       num_memories_per_trajectory: 2 # how many memories to extract from each trajectory
       summarization_batch_size: 0 # max trajectories per LLM batch (0 = submit all pending trajectories in one call).
       parse_max_attempts: 3 # max model calls when JSON parse yields no memories or all items fail validation (state/action/memory_text).
@@ -381,7 +384,7 @@ env:
     # VDB retrieval width; MemAdaptor may use only the first mem_adaptor.retrieval_top_k hits from memory_event.retrieved.
     top_k: 3
     min_retrieval_score: 0.0   # Minimum retrieval score threshold.
-    only_successful: True   # Whether retrieval only searches memories from successful trajectories.
+    only_successful: False   # Whether retrieval only searches memories from successful trajectories.
     rebuild_insert_batch_size: 1000   # Batch size for inserting records during rebuild.
     rebuild_embedding_batch_size: 256   # Batch size for computing embeddings during rebuild.
     # Optional: submit a Slurm batch job on another node to run the FastAPI memory server (Apptainer + uvicorn).
@@ -454,6 +457,8 @@ mem_adaptor:
   model:
     path: null   # HF checkpoint for adaptor when use_actor_rollout_wg=false (required then)
     use_shm: false
+  # When the main policy uses rollout.name=openai_api, the adaptor WorkerGroup still needs hf or vllm (default vllm).
+  local_rollout_name: vllm
   # Per-node GPU counts for mem_adaptor_pool (length must match trainer.nnodes). Default [1,...,1]. Sum with global pool must fit cluster.
   resource_pool_gpus_per_node: null
   # Fine-grained adaptor schedule (optional). Global step = trainer global_step during rollout; env step = post-step episode length for that env.

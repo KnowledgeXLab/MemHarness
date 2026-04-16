@@ -3,6 +3,8 @@
 # Online experience / memory write-back: LLM extracts JSON ``{"memories":[...]}`` per trajectory, then VDB insert.
 # - mode=self: batch prompts to ``actor_rollout_wg.generate_sequences`` (same Reasoning rollout worker).
 # - mode=teacher: OpenAI-compatible ``/v1/chat/completions`` on the driver (no Ray worker).
+# - schema=compact: small models output only ``memory_text`` (+ optional ``source_step``); ``state_text``/``action_text``
+#   are filled from the trajectory (EvolveR-style principles). schema=full matches ``extract_memory_records.py``.
 
 from __future__ import annotations
 
@@ -86,14 +88,56 @@ Return JSON with exactly this schema:
 Trajectory metadata:
 - dataset_item_id: {dataset_item_id}
 - trajectory_index: {trajectory_index}
-- episode_reward (online rollout): {episode_reward}
-- episode_length (online rollout): {episode_length}
-- success (online rollout): {success}
-- traj_uid (online rollout): {traj_uid}
 
 Trajectory:
 {trajectory_text}
 """
+
+# Fewer fields for weak extractors (small models / self-distill). Model outputs ``memory_text`` (+ optional ``source_step``);
+# ``state_text`` / ``action_text`` are filled from the trajectory when possible (EvolveR-style “Guiding Principle” in one line).
+DEFAULT_COMPACT_JSON_SYSTEM_PROMPT = """You analyze agent trajectories and distill generalizable wisdom (Guiding or Warning Principles).
+Each principle must be useful later: another run in a similar situation should benefit from retrieving it.
+
+Output one JSON object only. No markdown fences, no commentary before or after the JSON.
+
+Requirements:
+- Ground every principle in the trajectory; do not invent facts.
+- One clear English sentence per principle (core advice). No bullet lists inside memory_text.
+- Prefer strategies that explain what to do or check, not a play-by-play recap of this episode."""
+
+DEFAULT_COMPACT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE = """Benchmark: "{task_name}".
+The trajectory below is from a episode of the benchmark. Extract at most {num_memories} Guiding or Warning Principles.
+Each principle must be independently useful if stored in a memory bank and retrieved later.
+
+Return JSON exactly in this shape. ``source_step`` is optional (1-based index of the agent turn the principle is grounded in).
+{{
+  "memories": [
+    {{ "memory_text": "one-sentence principle here", "source_step": 1 }}
+  ]
+}}
+
+Example (different task—format only):
+{{
+  "memories": [
+    {{
+      "memory_text": "When a download fails with a 404, verify the URL before retrying instead of repeating the same request.",
+      "source_step": 2
+    }}
+  ]
+}}
+
+Trajectory metadata:
+- dataset_item_id: {dataset_item_id}
+- trajectory_index: {trajectory_index}
+
+Trajectory:
+{trajectory_text}
+"""
+
+
+def _extraction_schema(es: DictConfig) -> str:
+    s = str(es.get("schema", "full") or "full").strip().lower()
+    return "compact" if s == "compact" else "full"
 
 
 def experience_summarizer_active(config: DictConfig) -> bool:
@@ -446,16 +490,22 @@ def _dataset_item_id_from_infos(total_infos: List[List[Dict[str, Any]]], env_ind
     return env_index
 
 
-def _resolve_trajectory_user_prompt_template(es: DictConfig) -> str:
+def _resolve_trajectory_user_prompt_template(es: DictConfig, schema: str) -> str:
     t = es.trajectory_user_prompt_template
     if str(t).strip():
         return str(t)
-    return ""
+    if schema == "compact":
+        return DEFAULT_COMPACT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE
+    return DEFAULT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE
 
 
-def _resolve_system_prompt(es: DictConfig) -> str:
+def _resolve_system_prompt(es: DictConfig, schema: str) -> str:
     s = str(es.system_prompt).strip()
-    return s if s else DEFAULT_JSON_SYSTEM_PROMPT
+    if s:
+        return s
+    if schema == "compact":
+        return DEFAULT_COMPACT_JSON_SYSTEM_PROMPT
+    return DEFAULT_JSON_SYSTEM_PROMPT
 
 
 def _build_chat_prompt(
@@ -659,8 +709,20 @@ def _summarize_batch_self(
     out_pad = actor_rollout_wg.generate_sequences(dp_pad)
     out = unpad_dataproto(out_pad, pad_size=pad_size)
     n = len(prompts)
-    texts = tokenizer.batch_decode(out.batch["responses"][:n], skip_special_tokens=True)
-    return [t.strip() for t in texts]
+    # openai_api rollout: real text is in non_tensor_batch; ``responses`` are placeholders (often pad-only).
+    api_txt = out.non_tensor_batch.get("api_response_text") if out.non_tensor_batch else None
+    if api_txt is not None:
+        texts = []
+        for i in range(n):
+            if i < len(api_txt):
+                cell = api_txt[i]
+                texts.append(str(cell).strip() if cell is not None else "")
+            else:
+                texts.append("")
+    else:
+        texts = tokenizer.batch_decode(out.batch["responses"][:n], skip_special_tokens=True)
+        texts = [t.strip() for t in texts]
+    return texts
 
 
 def _chunk_ranges(length: int, chunk_size: int) -> List[Tuple[int, int]]:
@@ -670,10 +732,19 @@ def _chunk_ranges(length: int, chunk_size: int) -> List[Tuple[int, int]]:
 
 
 def _parse_memories_from_model_output(raw: str) -> list[dict[str, Any]]:
+    stripped = (raw or "").strip()
+    if not stripped:
+        logger.debug("experience_summarizer: empty extractor output; skip JSON parse")
+        return []
     try:
         obj = extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("experience_summarizer: JSON parse failed: %s", e)
+        preview = stripped[:240].replace("\n", " ")
+        logger.warning(
+            "experience_summarizer: JSON parse failed: %s | preview=%r",
+            e,
+            preview + ("…" if len(stripped) > 240 else ""),
+        )
         return []
     if "memories" not in obj:
         return []
@@ -694,6 +765,9 @@ def _memory_records_from_extractor_output(
     max_state_chars: int,
     max_action_chars: int,
     max_memory_chars: int,
+    schema: str = "full",
+    steps: Optional[List[Dict[str, Any]]] = None,
+    tokenizer: Optional[PreTrainedTokenizer] = None,
 ) -> list[MemoryRecord]:
     """Parse one trajectory's model output and return records that pass field validation."""
     env_index, traj_s, r, succ, traj_plain_for_llm, traj_chars_full, dataset_item_id = pending
@@ -716,6 +790,9 @@ def _memory_records_from_extractor_output(
             max_state_chars=max_state_chars,
             max_action_chars=max_action_chars,
             max_memory_chars=max_memory_chars,
+            schema=schema,
+            steps=steps,
+            tokenizer=tokenizer,
         )
         if rec is not None:
             out.append(rec)
@@ -849,15 +926,49 @@ def _memory_record_from_extracted_dict(
     max_state_chars: int,
     max_action_chars: int,
     max_memory_chars: int,
+    schema: str = "full",
+    steps: Optional[List[Dict[str, Any]]] = None,
+    tokenizer: Optional[PreTrainedTokenizer] = None,
 ) -> MemoryRecord | None:
+    schema_n = (schema or "full").strip().lower()
     st_raw = memory["state_text"] if "state_text" in memory and memory["state_text"] is not None else ""
     at_raw = memory["action_text"] if "action_text" in memory and memory["action_text"] is not None else ""
     mt_raw = memory["memory_text"] if "memory_text" in memory and memory["memory_text"] is not None else ""
+    memory_text = normalize_text(str(mt_raw), max_chars=max_memory_chars)
+    if not memory_text:
+        return None
+
+    if "source_step" in memory and memory["source_step"] is not None:
+        try:
+            source_step = int(memory["source_step"])
+        except (TypeError, ValueError):
+            source_step = memory_idx + 1
+    else:
+        source_step = memory_idx + 1
+
     state_text = normalize_text(str(st_raw), max_chars=max_state_chars)
     action_text = normalize_text(str(at_raw), max_chars=max_action_chars)
-    memory_text = normalize_text(str(mt_raw), max_chars=max_memory_chars)
-    if not state_text or not action_text or not memory_text:
-        return None
+
+    if schema_n == "compact" and steps is not None and tokenizer is not None:
+        ordered = _ordered_active_steps(steps)
+        if not state_text or not action_text:
+            if 1 <= source_step <= len(ordered):
+                _, step_one = ordered[source_step - 1]
+                if not state_text:
+                    state_text = normalize_text(
+                        _state_text_from_step(step_one, tokenizer), max_chars=max_state_chars
+                    )
+                if not action_text:
+                    action_text = normalize_text(
+                        _action_text_from_step(step_one, tokenizer), max_chars=max_action_chars
+                    )
+        if not state_text:
+            state_text = normalize_text(memory_text, max_chars=max_state_chars)
+        if not action_text:
+            action_text = normalize_text(memory_text, max_chars=max_action_chars)
+    else:
+        if not state_text or not action_text:
+            return None
 
     if "metadata" in memory and isinstance(memory["metadata"], dict):
         metadata = dict(memory["metadata"])
@@ -871,16 +982,9 @@ def _memory_record_from_extracted_dict(
         "trajectory_index": trajectory_index,
         "memory_index_within_trajectory": memory_idx,
         "extracted_by": extractor_model_label,
-        "experience_writeback_kind": "llm_extracted",
+        "experience_writeback_kind": "llm_extracted_compact" if schema_n == "compact" else "llm_extracted",
+        "extraction_schema": schema_n,
     }
-
-    if "source_step" in memory and memory["source_step"] is not None:
-        try:
-            source_step = int(memory["source_step"])
-        except (TypeError, ValueError):
-            source_step = memory_idx + 1
-    else:
-        source_step = memory_idx + 1
 
     value = memory["value"] if "value" in memory else None
     if value is not None:
@@ -964,10 +1068,9 @@ def maybe_summarize_and_write_experiences(
     num_mem_cfg = int(es.num_memories_per_trajectory)
     num_memories_cap = max(1, min(num_mem_cfg, max_pairs))
     summarization_batch_size = int(es.summarization_batch_size)
-    system_prompt = _resolve_system_prompt(es)
-    trajectory_user_prompt_template = _resolve_trajectory_user_prompt_template(es)
-    if not trajectory_user_prompt_template.strip():
-        trajectory_user_prompt_template = DEFAULT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE
+    extraction_schema = _extraction_schema(es)
+    system_prompt = _resolve_system_prompt(es, extraction_schema)
+    trajectory_user_prompt_template = _resolve_trajectory_user_prompt_template(es, extraction_schema)
     apply_kw = OmegaConf.to_container(config.data["apply_chat_template_kwargs"], resolve=True) or {}
 
     max_state = int(mem.max_state_chars)
@@ -977,6 +1080,7 @@ def maybe_summarize_and_write_experiences(
     batch_size = len(total_batch_list)
     trajectory_user_messages: List[str] = []
     pending_rollouts: List[Tuple[int, str, float, bool, str, int, Any]] = []
+    pending_steps: List[List[Dict[str, Any]]] = []
 
     for i in range(batch_size):
         steps = total_batch_list[i]
@@ -1027,6 +1131,7 @@ def maybe_summarize_and_write_experiences(
             continue
         trajectory_user_messages.append(user_message)
         pending_rollouts.append((i, traj_s, r, succ, traj_for_llm, len(traj_full_plain), dataset_item_id))
+        pending_steps.append(list(steps))
 
     if not trajectory_user_messages:
         return 0
@@ -1083,6 +1188,9 @@ def maybe_summarize_and_write_experiences(
                     max_state_chars=max_state,
                     max_action_chars=max_act,
                     max_memory_chars=max_mem,
+                    schema=extraction_schema,
+                    steps=pending_steps[idx],
+                    tokenizer=tokenizer,
                 )
                 if recs:
                     continue
@@ -1121,6 +1229,9 @@ def maybe_summarize_and_write_experiences(
             max_state_chars=max_state,
             max_action_chars=max_act,
             max_memory_chars=max_mem,
+            schema=extraction_schema,
+            steps=pending_steps[idx],
+            tokenizer=tokenizer,
         )
         records.extend(recs)
 

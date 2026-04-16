@@ -3,21 +3,26 @@ set -x
 set -euo pipefail
 export RAY_ADDRESS='http://10.140.37.75:8265'
 
-ENGINE="vllm" # 须为 vllm（或 hf）；勿用 openai_api 搭配 train_memory_adaptor, vllm | openai_api；openai_api 时需 export OPENAI_API_KEY
+# Reasoning：openai_api=外部 OpenAI 兼容 Chat API；Adaptor 仍用本地 vllm（mem_adaptor.local_rollout_name，见 main_ppo attach）
+ENGINE="openai_api"
+# 在下方填写 base_url、model；api_key 可在此填写，或留空并在提交前 export OPENAI_API_KEY（走 yaml 的 oc.env）
+REASONING_OPENAI_BASE_URL="http://10.140.37.43:8888/v1"
+REASONING_OPENAI_API_KEY="DataFrontier_qwen35_a3b"
+REASONING_OPENAI_MODEL="qwen3.5-35b-a3b"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # global_pool（Reasoning / Ref / Critic 等）每节点 GPU 数
-trainer_n_gpus_per_node=6
+trainer_n_gpus_per_node=2
 # mem_adaptor 专用池每节点 GPU 数（main_ppo 默认与 nnodes 同长度的 1 列表）
-mem_adaptor_gpus_per_node=2
+mem_adaptor_gpus_per_node=6
 # mem_adaptor 环境步调度：与 ppo_trainer.yaml 中 mem_adaptor.env_step_* 一致（减小 early-step 调用、增厚训练样本）
 # start=1，end 为开区间（例如 max_steps=30 时用 31 表示允许第 30 步）；every_n=1 表示每步都可触发
-mem_adaptor_env_step_start=3
-mem_adaptor_env_step_end=31
-mem_adaptor_env_step_every_n=3
+# mem_adaptor_env_step_start=3
+# mem_adaptor_env_step_end=31
+# mem_adaptor_env_step_every_n=3
 GPU_NUM="${trainer_n_gpus_per_node}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +43,7 @@ TASK_NAME="alfworld"
 MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
-RETRIEVAL_MODE="fixed" # agentic | fixed
+RETRIEVAL_MODE="agentic" # agentic | fixed
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 EMBEDDING_API_KEY="DataFrontier_bge_m3"
@@ -47,7 +52,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-18"
+MEMORY_REMOTE_EXCLUDE_NODES=""
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -58,13 +63,14 @@ MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memor
 
 EXPERIMENT_NAME="train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
-MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
-MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
+# 主 policy 走 API 时仍加载本地 HF（tokenizer + FSDP 占位权重）；可换更小模型省显存
+MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
+MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-retrieve_${RETRIEVE_KEY}"
-  EXPERIMENT_NAME="${EXPERIMENT_NAME}-writeback_${EXPERIENCE_SUMMARIZER_MODE}"
+  EXPERIMENT_NAME="${EXPERIMENT_NAME}-${EXPERIENCE_SUMMARIZER_MODE}_distill"
 else
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-no_memory"
 fi
@@ -78,13 +84,13 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
-train_data_size=18
+train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
 group_size=4
 max_concurrent=32
 
 # TP 与 GPU 数一致（单卡训练请保持1）
-tensor_model_parallel_size=2
+tensor_model_parallel_size=1 ## 使用openai_api时，主rollout不使用TP，须为1
 
 VALIDATE_ON_TRAIN_SPLIT=False
 
@@ -136,6 +142,15 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
   fi
 fi
 
+# 外部 Reasoning API（Hydra 覆盖；base_url/model 空则与 yaml 一致，仍为占位，需自行填写）
+REASONING_API_CLI=(
+  actor_rollout_ref.rollout.openai_api.base_url="${REASONING_OPENAI_BASE_URL}"
+  actor_rollout_ref.rollout.openai_api.model="${REASONING_OPENAI_MODEL}"
+)
+if [ -n "${REASONING_OPENAI_API_KEY}" ]; then
+  REASONING_API_CLI+=(actor_rollout_ref.rollout.openai_api.api_key="${REASONING_OPENAI_API_KEY}")
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -171,6 +186,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
       actor_rollout_ref.rollout.val_kwargs.do_sample=True \
       actor_rollout_ref.rollout.openai_api.max_concurrent="${max_concurrent}" \
+      "${REASONING_API_CLI[@]}" \
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.ref.fsdp_config.param_offload=True \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
@@ -181,9 +197,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       mem_adaptor.train_memory_adaptor=true \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
       mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
-      mem_adaptor.env_step_start="${mem_adaptor_env_step_start}" \
-      mem_adaptor.env_step_end="${mem_adaptor_env_step_end}" \
-      mem_adaptor.env_step_every_n="${mem_adaptor_env_step_every_n}" \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \
