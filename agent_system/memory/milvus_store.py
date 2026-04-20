@@ -8,7 +8,13 @@ import re
 import time
 from typing import Iterable
 
-from .experience_utility import UTILITY_LAPLACE_KEY, UTILITY_SUCC_KEY, UTILITY_USE_KEY, laplace_utility_score
+from .experience_utility import (
+    UTILITY_SCORE_KEY,
+    UTILITY_SUCC_KEY,
+    UTILITY_USE_KEY,
+    compute_utility_score,
+    read_utility_score_from_metadata,
+)
 from .types import MemoryRecord, RetrievedMemory
 
 SUPPORTED_MEMORY_INIT_MODES = {
@@ -445,11 +451,11 @@ class MilvusMemoryStore:
             if UTILITY_USE_KEY in merged_metadata or UTILITY_SUCC_KEY in merged_metadata:
                 c_use = int(merged_metadata.get(UTILITY_USE_KEY, 0))
                 c_succ = int(merged_metadata.get(UTILITY_SUCC_KEY, 0))
-                laplace = laplace_utility_score(c_use, c_succ)
-                merged_metadata[UTILITY_LAPLACE_KEY] = laplace
+                u_score = compute_utility_score(c_use, c_succ)
+                merged_metadata[UTILITY_SCORE_KEY] = u_score
                 if bool(update.get("_sync_value_from_utility", False)):
-                    row["value"] = float(laplace)
-                    row["value_source"] = "utility_laplace"
+                    row["value"] = float(u_score)
+                    row["value_source"] = "utility_score"
                     vu = update.get("value_update_step")
                     if vu is not None:
                         row["value_update_step"] = _safe_str(vu, 64)
@@ -498,7 +504,7 @@ class MilvusMemoryStore:
         return len(updated_entities)
 
     def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
-        """Delete memories whose Laplace utility is below ``score_threshold`` after ``min_uses`` retrievals."""
+        """Delete memories whose utility score is below ``score_threshold`` after ``min_uses`` retrievals."""
         client = self._ensure_client()
         min_uses = max(0, int(min_uses))
         threshold = float(score_threshold)
@@ -530,17 +536,9 @@ class MilvusMemoryStore:
                 c_use = int(meta.get(UTILITY_USE_KEY, 0))
                 if c_use < min_uses:
                     continue
-                lap = meta.get(UTILITY_LAPLACE_KEY)
-                if lap is None:
-                    c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
-                    lap = laplace_utility_score(c_use, c_succ)
-                else:
-                    try:
-                        lap = float(lap)
-                    except (TypeError, ValueError):
-                        c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
-                        lap = laplace_utility_score(c_use, c_succ)
-                if lap < threshold:
+                c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
+                u_score = read_utility_score_from_metadata(meta, c_use, c_succ)
+                if u_score < threshold:
                     to_delete.append(str(mid))
             offset += len(batch)
             if len(batch) < limit:

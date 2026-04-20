@@ -253,7 +253,7 @@ reward_model:
     weight_format: 0.1
     search_data_source_substrings:
       - search
-    min_segment_chars: 3
+    min_segment_chars: 5
     require_memory_retrieve: false
     weight_think: 1.0
     weight_action: 1.0
@@ -397,7 +397,7 @@ env:
       enable: true
       update_on_retrieval: true   # Increment utility_use_count when a memory is retrieved and injected.
       update_on_episode_end: true # On trajectory success, increment utility_succ_count for memories seen in infos.
-      prune_every_n_global_steps: 10   # 0 = disabled; e.g. 500 to prune low-score memories every N trainer steps.
+      prune_every_n_global_steps: 0   # 0 = disabled; e.g. 500 to prune low-score memories every N trainer steps.
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
       clear_every_n_global_steps: 0  # 0 = disabled; if >0, drops and recreates empty collection every N steps (runs before prune).

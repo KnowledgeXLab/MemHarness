@@ -23,6 +23,7 @@ import urllib.request
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizer
 
+from agent_system.memory.experience_utility import UTILITY_SCORE_KEY, initial_utility_metadata
 from agent_system.memory.memory_manager import MemoryManager, normalize_text
 from agent_system.memory.types import MemoryRecord
 from verl import DataProto
@@ -871,6 +872,7 @@ def _raw_trajectory_fallback_memory_record(
     store bloat). Kept for a future archival path (e.g. external files or a dedicated collection).
     """
     now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    um0 = initial_utility_metadata()
     meta = {
         "dataset_item_id": dataset_item_id,
         "trajectory_index": trajectory_index,
@@ -883,6 +885,7 @@ def _raw_trajectory_fallback_memory_record(
         "trajectory_chars": len(traj_full_plain),
         "trajectory_chars_for_prompt": 0,
         "trajectory_chars_full": len(traj_full_plain),
+        **um0,
     }
     st = normalize_text("[raw_trajectory_fallback]", max_chars=max_state_chars)
     at = normalize_text(source_episode_id, max_chars=max_action_chars)
@@ -903,8 +906,8 @@ def _raw_trajectory_fallback_memory_record(
         retrieval_count=0,
         last_used_step=None,
         metadata=meta,
-        value=None,
-        value_source=None,
+        value=float(um0[UTILITY_SCORE_KEY]),
+        value_source="utility_score_prior",
         value_update_step=None,
     )
 
@@ -993,6 +996,12 @@ def _memory_record_from_extracted_dict(
         except (TypeError, ValueError):
             value = None
 
+    utility_meta = initial_utility_metadata()
+    prior = float(utility_meta[UTILITY_SCORE_KEY])
+    llm_value_meta: dict[str, Any] = {}
+    if value is not None:
+        llm_value_meta["llm_suggested_value"] = value
+
     now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     return MemoryRecord(
         memory_id=str(uuid.uuid4()),
@@ -1011,14 +1020,16 @@ def _memory_record_from_extracted_dict(
         last_used_step=None,
         metadata={
             **metadata,
+            **utility_meta,
+            **llm_value_meta,
             "source": "experience_summarizer",
             "mode": mode,
             "trajectory_chars": trajectory_chars_for_prompt,
             "trajectory_chars_for_prompt": trajectory_chars_for_prompt,
             "trajectory_chars_full": trajectory_chars_full,
         },
-        value=value,
-        value_source="llm_extraction" if value is not None else None,
+        value=prior,
+        value_source="utility_score_prior",
         value_update_step=None,
     )
 

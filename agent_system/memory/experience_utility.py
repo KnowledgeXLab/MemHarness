@@ -8,11 +8,32 @@ import numpy as np
 
 UTILITY_USE_KEY = "utility_use_count"
 UTILITY_SUCC_KEY = "utility_succ_count"
-UTILITY_LAPLACE_KEY = "utility_laplace"
+UTILITY_SCORE_KEY = "utility_score"
 
 
-def laplace_utility_score(c_use: int, c_succ: int) -> float:
+def compute_utility_score(c_use: int, c_succ: int) -> float:
+    """Smoothed success rate (Beta(1,1) prior): (succ+1)/(use+2)."""
     return (float(c_succ) + 1.0) / (float(c_use) + 2.0)
+
+
+def read_utility_score_from_metadata(meta: dict[str, Any], c_use: int, c_succ: int) -> float:
+    """Prefer stored ``utility_score``; if missing or invalid, recompute from counts."""
+    raw = meta.get(UTILITY_SCORE_KEY)
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return compute_utility_score(c_use, c_succ)
+
+
+def initial_utility_metadata() -> dict[str, Any]:
+    """Counters before any online update; prior score (0,0) == 0.5."""
+    return {
+        UTILITY_USE_KEY: 0,
+        UTILITY_SUCC_KEY: 0,
+        UTILITY_SCORE_KEY: compute_utility_score(0, 0),
+    }
 
 
 def collect_memory_ids_from_info_list(infos: list[dict[str, Any]] | None) -> set[str]:
