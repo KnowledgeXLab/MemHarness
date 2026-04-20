@@ -21,6 +21,7 @@ import os
 from agent_system.environments.prompts import *
 from collections import defaultdict
 from agent_system.memory import MemoryManager
+from agent_system.memory.types import MemoryEvent
 
 def to_numpy(data):
     if isinstance(data, torch.Tensor):
@@ -127,21 +128,24 @@ class EnvironmentManagerBase:
             return "disabled"
         return self.retrieval_memory.retrieval_mode()
 
-    def _finalize_text_prompt_with_memory(self, prompt: str, state_text: str) -> str:
+    def _pair_finalize_memory(self, prompt: str, state_text: str) -> tuple[str, MemoryEvent | None]:
         if not self._memory_enabled():
-            return prompt
+            return prompt, None
 
         if self.retrieval_memory.is_fixed_mode():
             # Fixed mode: retrieval query embedding is built from `state_text` (current observation).
             # The vector DB indexes whichever field `env.memory.retrieve_key` names (optionally `memory_text` or `state_text`).
             # That pairing is asymmetric by design unless you set retrieve_key=state_text and rebuild.
-            memory_prompt = self.retrieval_memory.build_memory_message(state_text=state_text)
-            return self._append_external_memory(prompt, memory_prompt)
+            injected_text, event = self.retrieval_memory.build_memory_message_and_event(state_text=state_text)
+            return self._append_external_memory(prompt, injected_text), event
 
         if self.retrieval_memory.is_agentic_mode():
-            return self.retrieval_memory.append_retrieval_hint(prompt)
+            return self.retrieval_memory.append_retrieval_hint(prompt), None
 
-        return prompt
+        return prompt, None
+
+    def _finalize_text_prompt_with_memory(self, prompt: str, state_text: str) -> str:
+        return self._pair_finalize_memory(prompt, state_text)[0]
 
     def _extract_memory_queries(self, text_actions: List[str]) -> List[str | None]:
         if not self._memory_enabled() or not self.retrieval_memory.is_agentic_mode():

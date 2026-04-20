@@ -27,6 +27,12 @@ class BaseMemoryStore:
     def update_records(self, updates: Iterable[dict]) -> int:
         raise NotImplementedError
 
+    def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
+        return 0
+
+    def clear_all_records(self) -> None:
+        return
+
     def close(self) -> None:
         raise NotImplementedError
 
@@ -129,6 +135,20 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         payload = response.json()
         return int(payload.get("updated", 0)) if isinstance(payload, dict) else 0
 
+    def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
+        response = requests.post(
+            f"{self.base_url}/memories/prune",
+            json={"score_threshold": float(score_threshold), "min_uses": int(min_uses)},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return int(payload.get("deleted", 0)) if isinstance(payload, dict) else 0
+
+    def clear_all_records(self) -> None:
+        response = requests.post(f"{self.base_url}/memories/clear", json={}, timeout=self.timeout)
+        response.raise_for_status()
+
     def close(self) -> None:
         return
 
@@ -208,6 +228,12 @@ class MemoryStoreDispatcher(BaseMemoryStore):
 
     def update_records(self, updates: Iterable[dict]) -> int:
         return self.backend.update_records(updates)
+
+    def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
+        return self.backend.prune_low_utility_memories(score_threshold, min_uses)
+
+    def clear_all_records(self) -> None:
+        return self.backend.clear_all_records()
 
     def close(self) -> None:
         self.backend.close()

@@ -3,9 +3,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import defaultdict
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
+from .experience_utility import (
+    UTILITY_SUCC_KEY,
+    UTILITY_USE_KEY,
+    collect_memory_ids_from_info_list,
+    episode_success_from_batch,
+)
 from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
 
@@ -69,6 +76,9 @@ class MemoryManager:
             clean_before_init=memory_config.clean_before_init,
         )
 
+        self._last_utility_prune_step: int = -1
+        self._last_utility_clear_step: int = -1
+
         retrieval_mode = str(memory_config.retrieval_mode).strip().lower()
         retrieve_key = str(memory_config.retrieve_key).strip().lower()
         if retrieval_mode == "fixed" and retrieve_key in ("memory_text", "memory"):
@@ -92,6 +102,108 @@ class MemoryManager:
 
     def is_agentic_mode(self) -> bool:
         return self.retrieval_mode() == "agentic"
+
+    def _experience_utility_cfg(self) -> dict:
+        if not self.enabled or self.config is None:
+            return {}
+        eu = self.config.get("experience_utility")
+        if eu is None:
+            return {}
+        return OmegaConf.to_container(eu, resolve=True) or {}
+
+    def experience_utility_enabled(self) -> bool:
+        return bool(self._experience_utility_cfg().get("enable"))
+
+    def _apply_retrieval_utility_updates(self, retrieved: list[RetrievedMemory]) -> None:
+        if not self.experience_utility_enabled() or self.store is None:
+            return
+        cfg = self._experience_utility_cfg()
+        if not cfg.get("update_on_retrieval", True):
+            return
+        seen: set[str] = set()
+        updates: list[dict] = []
+        for memory in retrieved:
+            mid = (memory.memory_id or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            updates.append(
+                {
+                    "memory_id": mid,
+                    "_metadata_int_increment": {UTILITY_USE_KEY: 1},
+                    "_sync_value_from_utility": True,
+                }
+            )
+        if updates:
+            self.store.update_records(updates)
+
+    def _apply_episode_utility_updates(
+        self,
+        total_infos: list,
+        success: dict,
+        trainer_global_step: int | None,
+    ) -> None:
+        if not self.experience_utility_enabled() or self.store is None:
+            return
+        cfg = self._experience_utility_cfg()
+        if not cfg.get("update_on_episode_end", True):
+            return
+        if not total_infos or not success:
+            return
+        vu_step = "" if trainer_global_step is None else str(int(trainer_global_step))
+        batch_size = len(total_infos)
+        succ_deltas: dict[str, int] = defaultdict(int)
+        for env_i in range(batch_size):
+            if not episode_success_from_batch(success, env_i):
+                continue
+            infos_for_env = total_infos[env_i]
+            if not isinstance(infos_for_env, list):
+                continue
+            for mid in collect_memory_ids_from_info_list(infos_for_env):
+                succ_deltas[mid] += 1
+        updates = [
+            {
+                "memory_id": mid,
+                "_metadata_int_increment": {UTILITY_SUCC_KEY: int(delta)},
+                "_sync_value_from_utility": True,
+                "value_update_step": vu_step,
+            }
+            for mid, delta in succ_deltas.items()
+            if mid and delta > 0
+        ]
+        if updates:
+            self.store.update_records(updates)
+
+    def _maybe_run_experience_utility_maintenance(self, trainer_global_step: int | None) -> None:
+        if not self.experience_utility_enabled() or self.store is None:
+            return
+        if trainer_global_step is None:
+            return
+        step = int(trainer_global_step)
+        if step <= 0:
+            return
+        cfg = self._experience_utility_cfg()
+        clear_every = int(cfg.get("clear_every_n_global_steps") or 0)
+        if clear_every > 0 and step % clear_every == 0 and step != self._last_utility_clear_step:
+            self.store.clear_all_records()
+            self._last_utility_clear_step = step
+            self._last_utility_prune_step = step
+            logger.info("experience_utility: cleared memory store at global_step=%s", step)
+            return
+
+        prune_every = int(cfg.get("prune_every_n_global_steps") or 0)
+        if prune_every > 0 and step % prune_every == 0 and step != self._last_utility_prune_step:
+            threshold = float(cfg.get("prune_score_threshold", 0.35))
+            min_uses = int(cfg.get("min_uses_before_prune", 3))
+            deleted = self.store.prune_low_utility_memories(threshold, min_uses)
+            self._last_utility_prune_step = step
+            logger.info(
+                "experience_utility: pruned %s memories (threshold=%s min_uses=%s) at global_step=%s",
+                deleted,
+                threshold,
+                min_uses,
+                step,
+            )
 
     def append_retrieval_hint(self, prompt: str) -> str:
         if not self.enabled or not self.is_agentic_mode():
@@ -129,6 +241,8 @@ class MemoryManager:
         retrieved = self.store.retrieve(query_text=query_text)
         if not retrieved:
             return "", None
+
+        self._apply_retrieval_utility_updates(retrieved)
 
         injected_text = self._format_memory_prompt(retrieved)
         event = MemoryEvent(
@@ -168,18 +282,29 @@ class MemoryManager:
         if not total_batch_list or episode_rewards is None or episode_lengths is None or traj_uid is None:
             return []
 
+        total_infos = kwargs.get("total_infos") or []
+        success = kwargs.get("success") or {}
+        trainer_global_step = kwargs.get("trainer_global_step")
+
         maybe_summarize_and_write_experiences(
             config=config,
             memory_manager=self,
             tokenizer=tokenizer,
             actor_rollout_wg=kwargs.get("actor_rollout_wg"),
             total_batch_list=total_batch_list,
-            total_infos=kwargs.get("total_infos") or [],
+            total_infos=total_infos,
             episode_rewards=episode_rewards,
             episode_lengths=episode_lengths,
-            success=kwargs.get("success") or {},
+            success=success,
             traj_uid=traj_uid,
         )
+
+        self._apply_episode_utility_updates(
+            total_infos=total_infos,
+            success=success,
+            trainer_global_step=trainer_global_step,
+        )
+        self._maybe_run_experience_utility_maintenance(trainer_global_step)
         return []
 
     def close(self) -> None:

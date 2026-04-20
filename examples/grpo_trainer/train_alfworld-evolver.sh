@@ -5,7 +5,7 @@
 # 论文框架见 https://arxiv.org/abs/2510.16079
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.113:8265'
+export RAY_ADDRESS='http://10.140.37.45:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN

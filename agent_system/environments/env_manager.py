@@ -58,11 +58,14 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
 
         self.memory.reset(batch_size=len(obs))
 
+        mem_ev: list[dict | None] = []
         observations = {
-            "text": self.build_text_obs(obs, init=True),
+            "text": self.build_text_obs(obs, init=True, memory_events_out=mem_ev),
             "image": None,
             "anchor": obs.copy()
         }
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
         
         return observations, infos
 
@@ -74,14 +77,16 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
             "information": next_obs,
         })
 
+        mem_ev: list[dict | None] = []
         next_observations = {
-            "text": self.build_text_obs(next_obs),
+            "text": self.build_text_obs(next_obs, memory_events_out=mem_ev),
             "image": None,
             "anchor": next_obs.copy()
         }
         
         for i, info in enumerate(infos):
             info["is_action_valid"] = to_numpy(valids[i])
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
@@ -91,7 +96,8 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
     def build_text_obs(
         self,
         text_obs: List[str],
-        init: bool = False
+        init: bool = False,
+        memory_events_out: list[dict | None] | None = None,
     ) -> List[str]:
         postprocess_text_obs: List[str] = []
 
@@ -113,8 +119,10 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
                     memory_context=memory_ctx[i],
                     step_count=len(self.memory[i]),
                 )
-            obs_i = self._finalize_text_prompt_with_memory(obs_i, text_obs[i])
+            obs_i, ev = self._pair_finalize_memory(obs_i, text_obs[i])
             postprocess_text_obs.append(obs_i)
+            if memory_events_out is not None:
+                memory_events_out.append(ev.to_dict() if ev is not None else None)
 
         return postprocess_text_obs
 
@@ -219,7 +227,12 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         self.pre_text_obs = text_obs
         self.extract_task(text_obs)
 
-        full_text_obs = self.build_text_obs(text_obs, self.envs.get_admissible_commands, init=True)
+        mem_ev: list[dict | None] = []
+        full_text_obs = self.build_text_obs(
+            text_obs, self.envs.get_admissible_commands, init=True, memory_events_out=mem_ev
+        )
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
         return {'text': full_text_obs, 'image': image_obs, 'anchor': text_obs}, infos
     
     def step(self, text_actions: List[str]):
@@ -228,13 +241,17 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         self.memory.store({'text_obs': self.pre_text_obs, 'action': actions})
         self.pre_text_obs = text_obs
 
-        full_text_obs = self.build_text_obs(text_obs, self.envs.get_admissible_commands)
+        mem_ev: list[dict | None] = []
+        full_text_obs = self.build_text_obs(
+            text_obs, self.envs.get_admissible_commands, memory_events_out=mem_ev
+        )
         if infos[0].get("extra.gamefile") is None:
             infos = set_gamefile(infos, self.gamefile)
 
         # add action_valid to infos
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
 
         next_observations = {'text': full_text_obs, 'image': image_obs, 'anchor': text_obs}
         rewards = to_numpy(rewards)
@@ -252,7 +269,13 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                 raise ValueError("Task description not found in text observation.")
         
 
-    def build_text_obs(self, text_obs: List[str], admissible_actions: List[List[str]], init: bool = False) -> List[str]:
+    def build_text_obs(
+        self,
+        text_obs: List[str],
+        admissible_actions: List[List[str]],
+        init: bool = False,
+        memory_events_out: list[dict | None] | None = None,
+    ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
@@ -283,8 +306,10 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                     admissible_actions=reformatted_admissible_actions
                 )
 
-            obs = self._finalize_text_prompt_with_memory(obs, text_obs[i])
+            obs, ev = self._pair_finalize_memory(obs, text_obs[i])
             postprocess_text_obs.append(obs)
+            if memory_events_out is not None:
+                memory_events_out.append(ev.to_dict() if ev is not None else None)
         return postprocess_text_obs
 
     def step_with_memory(self, text_actions: List[str], current_obs=None, current_infos=None):
@@ -406,22 +431,25 @@ class SokobanEnvironmentManager(EnvironmentManagerBase):
 
     def reset(self, kwargs):
         obs, infos = self.envs.reset()
+        mem_ev: list[dict | None] = []
         if self.is_multi_modal:
             obs = np.array(obs, obs[0].dtype)
             self.pre_text_obs = self.envs.render(mode='tiny_rgb_array')
             observations = {
-                'text': self.build_text_obs(infos, init=True), 
+                'text': self.build_text_obs(infos, init=True, memory_events_out=mem_ev),
                 'image': obs,   
                 'anchor': obs
             }
         else:
             self.pre_text_obs = obs
             observations = {
-                'text': self.build_text_obs(infos, obs, init=True),
+                'text': self.build_text_obs(infos, obs, init=True, memory_events_out=mem_ev),
                 'image': None,
                 'anchor': obs
             }
         self.memory.reset(batch_size = len(infos))
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
         return observations, infos
 
     def step(self, text_actions: List[str]):
@@ -433,28 +461,38 @@ class SokobanEnvironmentManager(EnvironmentManagerBase):
             info['is_action_valid'] = to_numpy(valids[i])
 
         self.memory.store({'text_obs': self.pre_text_obs, 'action': [self.ACTION_LOOKUP[act] for act in actions]})
+        mem_ev: list[dict | None] = []
         if self.is_multi_modal:
             next_obs = np.array(next_obs, next_obs[0].dtype)
             self.pre_text_obs = self.envs.render(mode='tiny_rgb_array')
             next_observations = {
-                'text': self.build_text_obs(infos),  
+                'text': self.build_text_obs(infos, memory_events_out=mem_ev),
                 'image': next_obs,
                 'anchor': next_obs 
             }
         else:
             self.pre_text_obs = next_obs
             next_observations = {
-                'text': self.build_text_obs(infos, next_obs),  
+                'text': self.build_text_obs(infos, next_obs, memory_events_out=mem_ev),
                 'image': None, 
                 'anchor': next_obs 
             }
+
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
 
         return next_observations, rewards, dones, infos
 
-    def build_text_obs(self, infos, text_obs: List[str]=None, init: bool = False) -> List[str]:
+    def build_text_obs(
+        self,
+        infos,
+        text_obs: List[str] = None,
+        init: bool = False,
+        memory_events_out: list[dict | None] | None = None,
+    ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
@@ -483,9 +521,13 @@ class SokobanEnvironmentManager(EnvironmentManagerBase):
                         current_step=len(self.memory[i]) + 1,
                         current_observation=text_obs[i],
                     )
+            ev_dict = None
             if text_obs is not None:
-                obs = self._finalize_text_prompt_with_memory(obs, text_obs[i])
+                obs, ev = self._pair_finalize_memory(obs, text_obs[i])
+                ev_dict = ev.to_dict() if ev is not None else None
             postprocess_text_obs.append(obs)
+            if memory_events_out is not None:
+                memory_events_out.append(ev_dict)
 
         return postprocess_text_obs
 
@@ -543,12 +585,15 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
         self.tasks = self.extract_task(obs)
         obs = self.format_obs(obs)
         # infos = [None] * self.envs.num_envs
-        observations = {'text': self.build_text_obs(obs, infos, init=True), 
+        mem_ev: list[dict | None] = []
+        observations = {'text': self.build_text_obs(obs, infos, init=True, memory_events_out=mem_ev), 
                         'image': None, 
                         'anchor': obs.copy()
                         }
         self.pre_text_obs = obs
         self.memory.reset(batch_size = len(infos))
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
         return observations, infos
 
     def step(self, text_actions: List[str]):
@@ -560,14 +605,16 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
         self.memory.store({'text_obs': self.pre_text_obs, 'action': actions})
         self.pre_text_obs = next_obs
 
+        mem_ev: list[dict | None] = []
         next_observations = {
-            'text': self.build_text_obs(next_obs, infos),
+            'text': self.build_text_obs(next_obs, infos, memory_events_out=mem_ev),
             'image': None,
             'anchor': next_obs.copy()
         }
         # add action_valid to infos
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
@@ -612,7 +659,13 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
 
         return actions
             
-    def build_text_obs(self, text_obs: List[str], infos: List[List[str]], init: bool = False) -> List[str]:
+    def build_text_obs(
+        self,
+        text_obs: List[str],
+        infos: List[List[str]],
+        init: bool = False,
+        memory_events_out: list[dict | None] | None = None,
+    ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
@@ -652,8 +705,10 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                         available_actions=reformatted_available_actions
                     )
 
-            obs = self._finalize_text_prompt_with_memory(obs, text_obs[i])
+            obs, ev = self._pair_finalize_memory(obs, text_obs[i])
             postprocess_text_obs.append(obs)
+            if memory_events_out is not None:
+                memory_events_out.append(ev.to_dict() if ev is not None else None)
 
         return postprocess_text_obs
 
@@ -749,7 +804,10 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
         self.tasks = text_obs.copy()
         self.pre_text_obs = text_obs
 
-        full_text_obs = self.build_text_obs(text_obs, init=True)
+        mem_ev: list[dict | None] = []
+        full_text_obs = self.build_text_obs(text_obs, init=True, memory_events_out=mem_ev)
+        for i, info in enumerate(infos):
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
         return {'text': full_text_obs, 'image': None, 'anchor': text_obs}, infos
     
     def step(self, text_actions: List[str]):
@@ -760,11 +818,13 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
         self.memory.store({'text_obs': text_obs, 'action': actions})
         self.pre_text_obs = text_obs
 
-        full_text_obs = self.build_text_obs(text_obs)
+        mem_ev: list[dict | None] = []
+        full_text_obs = self.build_text_obs(text_obs, memory_events_out=mem_ev)
 
         # add action_valid to infos
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
+            info["memory_event"] = mem_ev[i] if i < len(mem_ev) else None
 
         next_observations = {'text': full_text_obs, 'image': None, 'anchor': text_obs}
         rewards = to_numpy(rewards)
@@ -773,7 +833,12 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
         return next_observations, rewards, dones, infos
     
 
-    def build_text_obs(self, text_obs: List[str], init: bool = False) -> List[str]:
+    def build_text_obs(
+        self,
+        text_obs: List[str],
+        init: bool = False,
+        memory_events_out: list[dict | None] | None = None,
+    ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
@@ -787,8 +852,10 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                         supervisor_phone_number=self.supervisors[i]['phone_number'],
                         task_description=self.tasks[i],
                     )
-                obs = self._finalize_text_prompt_with_memory(obs, text_obs[i])
+                obs, ev = self._pair_finalize_memory(obs, text_obs[i])
                 postprocess_text_obs.append(obs)
+                if memory_events_out is not None:
+                    memory_events_out.append(ev.to_dict() if ev is not None else None)
         else:
             for i in range(len(text_obs)):
                 # Get last `history_length` steps
@@ -817,8 +884,10 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                         current_step=len(self.memory[i]) + 1,
                         current_observation=text_obs[i],
                     )
-                obs = self._finalize_text_prompt_with_memory(obs, text_obs[i])
+                obs, ev = self._pair_finalize_memory(obs, text_obs[i])
                 postprocess_text_obs.append(obs)
+                if memory_events_out is not None:
+                    memory_events_out.append(ev.to_dict() if ev is not None else None)
         return postprocess_text_obs
 
     def step_with_memory(self, text_actions: List[str], current_obs=None, current_infos=None):

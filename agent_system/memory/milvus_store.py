@@ -8,6 +8,7 @@ import re
 import time
 from typing import Iterable
 
+from .experience_utility import UTILITY_LAPLACE_KEY, UTILITY_SUCC_KEY, UTILITY_USE_KEY, laplace_utility_score
 from .types import MemoryRecord, RetrievedMemory
 
 SUPPORTED_MEMORY_INIT_MODES = {
@@ -422,19 +423,38 @@ class MilvusMemoryStore:
 
             row = dict(existing_rows[0])
             retrieval_increment = int(update.get("_increment_retrieval_count", 0))
-            if "metadata" in update and isinstance(update["metadata"], dict):
-                current_metadata = row.get("metadata", {})
-                if isinstance(current_metadata, str):
-                    try:
-                        current_metadata = json.loads(current_metadata)
-                    except json.JSONDecodeError:
-                        current_metadata = {}
-                if not isinstance(current_metadata, dict):
+
+            current_metadata = row.get("metadata", {})
+            if isinstance(current_metadata, str):
+                try:
+                    current_metadata = json.loads(current_metadata)
+                except json.JSONDecodeError:
                     current_metadata = {}
-                merged_metadata = dict(current_metadata)
+            if not isinstance(current_metadata, dict):
+                current_metadata = {}
+            merged_metadata = dict(current_metadata)
+
+            meta_inc = update.get("_metadata_int_increment")
+            if meta_inc and isinstance(meta_inc, dict):
+                for key, delta in meta_inc.items():
+                    merged_metadata[key] = int(merged_metadata.get(key, 0)) + int(delta)
+
+            if "metadata" in update and isinstance(update["metadata"], dict):
                 merged_metadata.update(update["metadata"])
-                update = dict(update)
-                update["metadata"] = merged_metadata
+
+            if UTILITY_USE_KEY in merged_metadata or UTILITY_SUCC_KEY in merged_metadata:
+                c_use = int(merged_metadata.get(UTILITY_USE_KEY, 0))
+                c_succ = int(merged_metadata.get(UTILITY_SUCC_KEY, 0))
+                laplace = laplace_utility_score(c_use, c_succ)
+                merged_metadata[UTILITY_LAPLACE_KEY] = laplace
+                if bool(update.get("_sync_value_from_utility", False)):
+                    row["value"] = float(laplace)
+                    row["value_source"] = "utility_laplace"
+                    vu = update.get("value_update_step")
+                    if vu is not None:
+                        row["value_update_step"] = _safe_str(vu, 64)
+
+            row["metadata"] = merged_metadata
 
             for field in [
                 "task_name",
@@ -449,7 +469,6 @@ class MilvusMemoryStore:
                 "created_step",
                 "retrieval_count",
                 "last_used_step",
-                "metadata",
                 "value",
                 "value_source",
                 "value_update_step",
@@ -477,6 +496,83 @@ class MilvusMemoryStore:
         self._insert_entities_in_batches(updated_entities)
         self.logger.info("update_records updated=%s collection=%s", len(updated_entities), self.collection_name)
         return len(updated_entities)
+
+    def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
+        """Delete memories whose Laplace utility is below ``score_threshold`` after ``min_uses`` retrievals."""
+        client = self._ensure_client()
+        min_uses = max(0, int(min_uses))
+        threshold = float(score_threshold)
+        to_delete: list[str] = []
+        offset = 0
+        limit = 1000
+        while True:
+            batch = client.query(
+                collection_name=self.collection_name,
+                filter="",
+                output_fields=["memory_id", "metadata"],
+                limit=limit,
+                offset=offset,
+            )
+            if not batch:
+                break
+            for entity in batch:
+                mid = entity.get("memory_id")
+                if not mid:
+                    continue
+                meta = entity.get("metadata", {})
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except json.JSONDecodeError:
+                        meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                c_use = int(meta.get(UTILITY_USE_KEY, 0))
+                if c_use < min_uses:
+                    continue
+                lap = meta.get(UTILITY_LAPLACE_KEY)
+                if lap is None:
+                    c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
+                    lap = laplace_utility_score(c_use, c_succ)
+                else:
+                    try:
+                        lap = float(lap)
+                    except (TypeError, ValueError):
+                        c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
+                        lap = laplace_utility_score(c_use, c_succ)
+                if lap < threshold:
+                    to_delete.append(str(mid))
+            offset += len(batch)
+            if len(batch) < limit:
+                break
+
+        if not to_delete:
+            return 0
+
+        deleted = 0
+        chunk_size = 256
+        for start in range(0, len(to_delete), chunk_size):
+            chunk = to_delete[start : start + chunk_size]
+            expr = ", ".join(f'"{memory_id}"' for memory_id in chunk)
+            client.delete(collection_name=self.collection_name, filter=f"memory_id in [{expr}]")
+            deleted += len(chunk)
+        self.logger.info(
+            "prune_low_utility_memories deleted=%s threshold=%.4f min_uses=%s collection=%s",
+            deleted,
+            threshold,
+            min_uses,
+            self.collection_name,
+        )
+        return deleted
+
+    def clear_all_records(self) -> None:
+        """Drop and recreate an empty collection (same schema)."""
+        client = self._ensure_client()
+        collections = set(client.list_collections())
+        if self.collection_name in collections:
+            client.drop_collection(self.collection_name)
+        self._create_collection()
+        self.logger.info("clear_all_records recreated collection=%s", self.collection_name)
 
     def close(self) -> None:
         if self._client is None:

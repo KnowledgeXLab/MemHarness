@@ -77,4 +77,24 @@ def create_memory_fastapi_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.post("/memories/prune")
+    async def memories_prune(body: dict) -> dict[str, Any]:
+        try:
+            score_threshold = float(body.get("score_threshold", 0.0))
+            min_uses = int(body.get("min_uses", 0))
+            with lock:
+                deleted = store.prune_low_utility_memories(score_threshold, min_uses)
+            return {"deleted": deleted}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/memories/clear")
+    async def memories_clear() -> dict[str, Any]:
+        try:
+            with lock:
+                store.clear_all_records()
+            return {"status": "ok"}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     return app

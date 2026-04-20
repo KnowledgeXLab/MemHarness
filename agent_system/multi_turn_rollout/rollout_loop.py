@@ -553,6 +553,7 @@ class TrajectoryCollector:
             episode_lengths=episode_lengths,
             success=success,
             traj_uid=traj_uid,
+            trainer_global_step=trainer_global_step,
         )
 
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
