@@ -13,6 +13,7 @@ from .experience_utility import (
     collect_memory_ids_from_info_list,
     episode_success_from_batch,
 )
+from .global_step_schedule import match_phase_for_global_step
 from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
 
@@ -37,6 +38,7 @@ class MemoryManager:
     def __init__(self, memory_config: DictConfig | None, task_name: str) -> None:
         self.config = memory_config
         self.task_name = task_name
+        self._trainer_global_step: int | None = None
         self.enabled = bool(memory_config.enabled)
         self.store = None
 
@@ -92,9 +94,19 @@ class MemoryManager:
     def refresh(self) -> None:
         return
 
+    def set_trainer_global_step(self, step: int | None) -> None:
+        """Set current trainer step for ``retrieval_mode_phases`` (rollout sets this once per batch)."""
+        self._trainer_global_step = int(step) if step is not None else None
+
     def retrieval_mode(self) -> str:
         if not self.enabled:
             return "disabled"
+        phase = match_phase_for_global_step(
+            self.config.get("retrieval_mode_phases"),
+            self._trainer_global_step,
+        )
+        if phase is not None and phase.get("mode") is not None:
+            return str(phase["mode"]).strip().lower()
         return str(self.config.retrieval_mode).strip().lower()
 
     def is_fixed_mode(self) -> bool:

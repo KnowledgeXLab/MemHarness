@@ -348,6 +348,17 @@ env:
   memory:
     enabled: False   # Whether to enable the external memory module.
     retrieval_mode: fixed   # fixed: retrieve on every observation; agentic: let the model decide when to retrieve.
+    # Optional: override ``retrieval_mode`` by trainer ``global_step`` (inclusive start, exclusive end).
+    # First matching phase wins. If no phase matches, ``retrieval_mode`` above is used.
+    # Example:
+    # retrieval_mode_phases:
+    #   - global_step_start: 0
+    #     global_step_end: 200
+    #     mode: fixed
+    #   - global_step_start: 200
+    #     global_step_end: null
+    #     mode: agentic
+    retrieval_mode_phases: null
     backend: milvus   # Memory backend type. "milvus" for local VDB, "http" for remote/local service.
     auto_start_server: True   # Whether to auto-start a local HTTP memory service.
     mode: init_if_missing   # Initialization mode for the vector store.
@@ -504,6 +515,20 @@ mem_adaptor:
   env_step_start: null            # inclusive 1-based env step; null defaults to 1
   env_step_end: null              # exclusive; null = unbounded
   env_step_every_n: 1             # run adaptor only when (env_step - env_step_start) % n == 0
+  # Optional: per global-step window, override the three keys above (same semantics). First match wins.
+  # Example: early training call adaptor on every env step; later only every 2nd step from 5 onward:
+  # env_step_phases:
+  #   - global_step_start: 0
+  #     global_step_end: 300
+  #     env_step_start: 1
+  #     env_step_end: 31
+  #     env_step_every_n: 1
+  #   - global_step_start: 300
+  #     global_step_end: null
+  #     env_step_start: 5
+  #     env_step_end: 31
+  #     env_step_every_n: 2
+  env_step_phases: null
   system_prompt: >-
     You adapt a retrieved memory principle to the CURRENT situation, or output exactly <EMPTY> if the principle does not apply.
   user_message_template: |-

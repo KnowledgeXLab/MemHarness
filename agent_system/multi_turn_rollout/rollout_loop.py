@@ -339,6 +339,8 @@ class TrajectoryCollector:
         """
 
         batch_size = len(gen_batch.batch)
+        if hasattr(envs, "set_memory_rollout_context"):
+            envs.set_memory_rollout_context(trainer_global_step)
 
         # Initial observations from the environment
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))

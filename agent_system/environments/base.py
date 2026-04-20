@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Dict, Union, Any
+from typing import List, Tuple, Dict, Union, Any, Optional
 from copy import deepcopy
 import torch
 import numpy as np
@@ -122,6 +122,11 @@ class EnvironmentManagerBase:
 
     def _memory_enabled(self) -> bool:
         return self.retrieval_memory is not None and self.retrieval_memory.enabled
+
+    def set_memory_rollout_context(self, trainer_global_step: Optional[int] = None) -> None:
+        """Called at rollout start so ``MemoryManager`` can resolve ``retrieval_mode_phases``."""
+        if self.retrieval_memory is not None:
+            self.retrieval_memory.set_trainer_global_step(trainer_global_step)
 
     def _memory_retrieval_mode(self) -> str:
         if not self._memory_enabled():

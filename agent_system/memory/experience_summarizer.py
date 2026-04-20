@@ -201,11 +201,6 @@ def _format_trajectory_plain(
     return body
 
 
-def _step_has_memory_retrieve(step: Dict[str, Any], tokenizer: PreTrainedTokenizer) -> bool:
-    blob = (_action_text_from_step(step, tokenizer) + "\n" + _state_text_from_step(step, tokenizer)).lower()
-    return "<memory_retrieve>" in blob or "</memory_retrieve>" in blob
-
-
 def _step_outputs_memory_retrieve(step: Dict[str, Any], tokenizer: PreTrainedTokenizer) -> bool:
     return "<memory_retrieve>" in _action_text_from_step(step, tokenizer).lower()
 
@@ -244,7 +239,7 @@ def _select_ordered_steps_head_tail_protected(
     protected_positions: list[int] = []
     for i in range(h, n - t):
         _, st = ordered[i]
-        if _step_has_memory_retrieve(st, tokenizer):
+        if _step_outputs_memory_retrieve(st, tokenizer):
             keep_pos.add(i)
             protected_positions.append(i)
     for i in range(n - 1):
@@ -287,9 +282,16 @@ def _format_ordered_steps_plain(
 
 
 def _protection_mask_ordered(ordered: List[Tuple[int, Dict[str, Any]]], tokenizer: PreTrainedTokenizer) -> List[bool]:
+    """Steps to avoid dropping when shrinking the trajectory for the summarizer prompt budget.
+
+    Only **model actions** that emit a memory-retrieve query are protected, plus the **next** step (injection
+    / continuation). Do **not** key off the full observation prompt: task instructions often contain the
+    literal substring ``<memory_retrieve>``, which would mark every turn protected and make token trim fail
+    with "all turns are retrieve-protected".
+    """
     prot = [False] * len(ordered)
     for i, (_, st) in enumerate(ordered):
-        if _step_has_memory_retrieve(st, tokenizer):
+        if _step_outputs_memory_retrieve(st, tokenizer):
             prot[i] = True
     for i in range(len(ordered) - 1):
         if _step_outputs_memory_retrieve(ordered[i][1], tokenizer):

@@ -20,6 +20,8 @@ from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
+from agent_system.memory.global_step_schedule import match_phase_for_global_step
+
 
 def _mem_cfg(config: DictConfig) -> DictConfig:
     ma = OmegaConf.select(config, "mem_adaptor")
@@ -95,13 +97,30 @@ def _passes_train_global_window(ma: DictConfig, trainer_global_step: Optional[in
     return True
 
 
-def _passes_env_step_window(ma: DictConfig, env_step_1based: Optional[int]) -> bool:
-    """Env step index after the current env step (matches post-increment ``episode_lengths[i]``)."""
+def _passes_env_step_window(
+    ma: DictConfig,
+    env_step_1based: Optional[int],
+    trainer_global_step: Optional[int] = None,
+) -> bool:
+    """Env step index after the current env step (matches post-increment ``episode_lengths[i]``).
+
+    When ``mem_adaptor.env_step_phases`` is set, the first matching global-step phase overrides
+    ``env_step_start`` / ``env_step_end`` / ``env_step_every_n`` for that window.
+    """
     if env_step_1based is None:
         return True
+    phase = match_phase_for_global_step(ma.get("env_step_phases"), trainer_global_step)
     es0 = ma["env_step_start"]
     es1 = ma["env_step_end"]
-    ev_n = int(ma["env_step_every_n"])
+    ev_n = ma["env_step_every_n"]
+    if phase:
+        if phase.get("env_step_start") is not None:
+            es0 = phase["env_step_start"]
+        if phase.get("env_step_end") is not None:
+            es1 = phase["env_step_end"]
+        if phase.get("env_step_every_n") is not None:
+            ev_n = phase["env_step_every_n"]
+    ev_n = int(ev_n)
     start = int(es0) if es0 is not None else 1
     if env_step_1based < start:
         return False
@@ -335,7 +354,7 @@ def maybe_apply_memory_adaptor(
         env_step_i: Optional[int] = None
         if episode_lengths is not None and i < len(episode_lengths):
             env_step_i = int(episode_lengths[i])
-        if not _passes_env_step_window(ma, env_step_i):
+        if not _passes_env_step_window(ma, env_step_i, trainer_global_step):
             continue
         ev = infos[i]["memory_event"]
         pairs = _retrieved_state_principle_pairs(ev, top_k)

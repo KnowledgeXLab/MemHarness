@@ -18,11 +18,17 @@ export WANDB_MODE="offline"
 trainer_n_gpus_per_node=2
 # mem_adaptor 专用池每节点 GPU 数（main_ppo 默认与 nnodes 同长度的 1 列表）
 mem_adaptor_gpus_per_node=6
-# mem_adaptor 环境步调度：与 ppo_trainer.yaml 中 mem_adaptor.env_step_* 一致（减小 early-step 调用、增厚训练样本）
-# start=1，end 为开区间（例如 max_steps=30 时用 31 表示允许第 30 步）；every_n=1 表示每步都可触发
-# mem_adaptor_env_step_start=3
-# mem_adaptor_env_step_end=31
-# mem_adaptor_env_step_every_n=3
+
+# --- 可选：按 trainer global_step 切换记忆检索 / Adaptor 调度 ---
+# 设为 1 时会在下方 ray 命令里追加 MEM_ADAPTOR_PHASES_CLI（与 env.max_steps=30 对齐：env_step_end=31）。
+# 0：不追加，完全依赖 ppo_trainer.yaml 根键 + 本脚本里的 env.memory.retrieval_mode。
+MEM_ADAPTOR_USE_RECOMMENDED_PHASES="1"
+
+# 1) 记忆检索：trainer global_step ∈ [0,30) 为 fixed，[30,∞) 为 agentic（与下方 retrieval_mode_phases 一致）。
+# 2) Adaptor：env_step_phases 两段均为 env 步 1..30、every_n=1（与 env.max_steps=30、env_step_end=31 一致），
+#    不在 env 维度做稀疏；是否在一步上跑 Adaptor 还取决于 mem_adaptor.schedule=on_memory_only：
+#    仅当该步已有检索结果（memory_event.retrieved 非空）或注入了 memory_injected_text 时才进入 Adaptor，
+#    即「有一次检索就有一次 Adaptor」
 GPU_NUM="${trainer_n_gpus_per_node}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +59,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-38"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -152,6 +158,14 @@ if [ -n "${REASONING_OPENAI_API_KEY}" ]; then
   REASONING_API_CLI+=(actor_rollout_ref.rollout.openai_api.api_key="${REASONING_OPENAI_API_KEY}")
 fi
 
+MEM_ADAPTOR_PHASES_CLI=()
+if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
+  MEM_ADAPTOR_PHASES_CLI+=(
+    env.memory.retrieval_mode_phases='[{global_step_start:0,global_step_end:30,mode:fixed},{global_step_start:30,global_step_end:null,mode:agentic}]'
+    mem_adaptor.env_step_phases='[{global_step_start:0,global_step_end:30,env_step_start:1,env_step_end:31,env_step_every_n:1},{global_step_start:31,global_step_end:null,env_step_start:null,env_step_end:null,env_step_every_n:1}]'
+  )
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -208,6 +222,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
+      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
       env.rollout.n="${group_size}" \
