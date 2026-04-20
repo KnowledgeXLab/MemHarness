@@ -200,8 +200,11 @@ class EnvironmentManagerBase:
         for info in infos:
             info["memory_action_type"] = "env_action"
             info["memory_query_text"] = None
-            info["memory_injected_text"] = ""
-            info["memory_event"] = None
+            ev = info.get("memory_event")
+            if isinstance(ev, dict):
+                info["memory_injected_text"] = str(ev.get("injected_text") or "")
+            else:
+                info.setdefault("memory_injected_text", "")
         env_step_mask = np.ones(len(text_actions), dtype=bool)
         return next_obs, rewards, dones, infos, env_step_mask
 
