@@ -244,6 +244,31 @@ reward_model:
   sandbox_fusion:
     url: null # faas url to run code in cloud sandbox
     max_concurrent: 64 # max concurrent requests to sandbox
+  # Outcome (episode_rewards) + format reward on the last response token.
+  # Non-Search: think + action + optional memory_retrieve. Search: think + exclusive search xor answer (+ optional memory).
+  format_reward:
+    enable: true
+    weight_outcome: 1.0
+    # Set > 0 to compute format and add ``weight_outcome * outcome + weight_format * format`` on the last response token.
+    weight_format: 0.1
+    search_data_source_substrings:
+      - search
+    min_segment_chars: 3
+    require_memory_retrieve: false
+    weight_think: 1.0
+    weight_action: 1.0
+    weight_memory: 1.0
+    penalize_chinese_chars: true
+    think_open_tag: "<think>"
+    think_close_tag: "</think>"
+    action_open_tag: "<action>"
+    action_close_tag: "</action>"
+    search_open_tag: "<search>"
+    search_close_tag: "</search>"
+    answer_open_tag: "<answer>"
+    answer_close_tag: "</answer>"
+    memory_open_tag: ${env.memory.retrieval_query_open_tag}
+    memory_close_tag: ${env.memory.retrieval_query_close_tag}
 custom_reward_function:
   path: null
   name: compute_score

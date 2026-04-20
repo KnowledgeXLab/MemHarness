@@ -267,10 +267,20 @@ class TaskRunner:
             else:
                 raise NotImplementedError
 
-            reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=20, normalize_by_length=False)
+            reward_fn = reward_manager_cls(
+                tokenizer=tokenizer,
+                num_examine=20,
+                normalize_by_length=False,
+                config=config,
+            )
 
             # Note that we always use function-based RM for validation
-            val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=20, normalize_by_length=False)
+            val_reward_fn = reward_manager_cls(
+                tokenizer=tokenizer,
+                num_examine=20,
+                normalize_by_length=False,
+                config=config,
+            )
 
             resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
