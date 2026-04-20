@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.75:8265'
+export RAY_ADDRESS='http://10.140.37.99:8265'
 
 # Reasoning：openai_api=外部 OpenAI 兼容 Chat API；Adaptor 仍用本地 vllm（mem_adaptor.local_rollout_name，见 main_ppo attach）
 ENGINE="openai_api"
 # 在下方填写 base_url、model；api_key 可在此填写，或留空并在提交前 export OPENAI_API_KEY（走 yaml 的 oc.env）
-REASONING_OPENAI_BASE_URL="http://10.140.37.43:8888/v1"
-REASONING_OPENAI_API_KEY="DataFrontier_qwen35_a3b"
-REASONING_OPENAI_MODEL="qwen3.5-35b-a3b"
+REASONING_OPENAI_BASE_URL="http://35.220.164.252:3888/v1"
+REASONING_OPENAI_API_KEY="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH"
+REASONING_OPENAI_MODEL="gpt-4o-mini"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
@@ -43,6 +43,7 @@ TASK_NAME="alfworld"
 MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
+EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic" # agentic | fixed
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
@@ -52,7 +53,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
-MEMORY_REMOTE_EXCLUDE_NODES=""
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-38"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -61,7 +62,7 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 # MEMORY_REBUILD_SOURCE_PATH=""
 
-EXPERIMENT_NAME="train_adaptor"
+EXPERIMENT_NAME="actor_$REASONING_OPENAI_MODEL-train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 # 主 policy 走 API 时仍加载本地 HF（tokenizer + FSDP 占位权重）；可换更小模型省显存
 MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
@@ -175,7 +176,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.model.enable_gradient_checkpointing=True \
       actor_rollout_ref.actor.fsdp_config.param_offload=False \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-      actor_rollout_ref.actor.use_torch_compile=false \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
@@ -205,6 +205,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.store_dir="${MEMORY_STORE_DIR}" \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
+      env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
@@ -221,6 +222,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=True \
+      trainer.val_before_train=False \
       trainer.val_only=False \
       "$@"

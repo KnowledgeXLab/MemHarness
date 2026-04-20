@@ -66,8 +66,8 @@ def format_mem_adaptor_training_sample_for_log(
     sample: Dict[str, Any],
     tokenizer: "PreTrainedTokenizer",
     *,
-    max_prompt_chars: int = 800,
-    max_response_chars: int = 800,
+    max_prompt_chars: int = 4096,
+    max_response_chars: int = 4096,
 ) -> str:
     """Decode one adaptor GRPO training row (CPU prompt/response ids) for stdout / file logs."""
 
@@ -93,6 +93,7 @@ def format_mem_adaptor_training_sample_for_log(
         f"traj_uid={tu} grpo_index={gi}\n"
         f"--- prompt (truncated to {max_prompt_chars} chars) ---\n{prompt}\n"
         f"--- response (truncated to {max_response_chars} chars) ---\n{resp}"
+        f"-----------------example end-----------------------"
     )
 
 

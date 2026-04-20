@@ -86,10 +86,6 @@ Return JSON with exactly this schema:
   ]
 }}
 
-Trajectory metadata:
-- dataset_item_id: {dataset_item_id}
-- trajectory_index: {trajectory_index}
-
 Trajectory:
 {trajectory_text}
 """
@@ -126,10 +122,6 @@ Example (different task—format only):
     }}
   ]
 }}
-
-Trajectory metadata:
-- dataset_item_id: {dataset_item_id}
-- trajectory_index: {trajectory_index}
 
 Trajectory:
 {trajectory_text}

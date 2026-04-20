@@ -370,7 +370,7 @@ env:
       system_prompt: "" # empty -> built-in JSON extraction system prompt
       trajectory_user_prompt_template: "" # empty -> built-in template (same schema as extract_memory_records.py)
       # Long-episode compress for write-back summarization (head+tail+protect <memory_retrieve>, then turn-level trim to token budget).
-      summarizer_trajectory_structural_compress: false
+      summarizer_trajectory_structural_compress: True
       summarizer_trajectory_episode_max_turns: 50
       summarizer_trajectory_head_turns: 10
       summarizer_trajectory_tail_turns: 10
@@ -379,7 +379,7 @@ env:
       summarizer_trajectory_include_coverage_note: true
       temperature: 0.6
       top_p: 1.0
-      do_sample: false
+      do_sample: True
       openai_api:
         base_url: https://api.openai.com/v1
         api_key: ${oc.env:OPENAI_API_KEY,}

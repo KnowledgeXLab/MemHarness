@@ -47,7 +47,7 @@ EMBEDDING_API_KEY="DataFrontier_bge_m3"
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES=""
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-18"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -74,7 +74,6 @@ EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
 EXPERIMENT_NAME="train_evolver"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
-# 要训练的 memory-aware reasoning checkpoint（HF）；按你资源改 TP / 模型规模
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -94,7 +93,7 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
-train_data_size=32
+train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
 group_size=8
 
@@ -179,7 +178,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
       data.max_prompt_length=8192 \
-      data.max_response_length=512 \
+      data.max_response_length=1024 \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
@@ -187,23 +186,22 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.trainable=true \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.model.use_remove_padding=True \
-      actor_rollout_ref.actor.ppo_mini_batch_size=192 \
-      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+      actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
       actor_rollout_ref.actor.use_kl_loss=True \
       actor_rollout_ref.actor.kl_loss_coef=0.01 \
       actor_rollout_ref.actor.kl_loss_type=low_var_kl \
       actor_rollout_ref.model.enable_gradient_checkpointing=True \
       actor_rollout_ref.actor.fsdp_config.param_offload=False \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-      actor_rollout_ref.actor.use_torch_compile=false \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+      actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
       actor_rollout_ref.rollout.enforce_eager=False \
       actor_rollout_ref.rollout.free_cache_engine=False \
-      actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
+      actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
       actor_rollout_ref.rollout.val_kwargs.do_sample=True \
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -239,6 +237,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=True \
+      trainer.val_before_train=False \
       trainer.val_only=False \
       "$@"

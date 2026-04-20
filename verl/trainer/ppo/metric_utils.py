@@ -25,6 +25,42 @@ import torch
 from verl import DataProto
 from verl.utils.import_utils import deprecated
 
+try:
+    from agent_system.reward_manager.format_reward import FORMAT_REWARD_EXTRA_KEYS
+except ImportError: 
+    FORMAT_REWARD_EXTRA_KEYS = ()
+
+# Populated into ``batch.non_tensor_batch`` by ``EpisodeRewardManager`` (``reward_extra_info``).
+_REWARD_DECOMP_SCALAR_KEYS = (
+    "outcome_reward_scalar",
+    "format_reward_scalar",
+    "combined_reward_scalar",
+)
+
+
+def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
+    """Mean (and min/max) for episode reward decomposition and format sub-scores."""
+    out: Dict[str, Any] = {}
+    ntb = batch.non_tensor_batch
+    for key in _REWARD_DECOMP_SCALAR_KEYS + tuple(FORMAT_REWARD_EXTRA_KEYS):
+        if key not in ntb:
+            continue
+        raw = ntb[key]
+        arr = np.asarray(raw, dtype=np.float64).reshape(-1)
+        if arr.size == 0:
+            continue
+        # wandb-friendly short names
+        short = {
+            "outcome_reward_scalar": "outcome",
+            "format_reward_scalar": "format",
+            "combined_reward_scalar": "combined",
+        }.get(key, key)
+        out[f"reward/{short}/mean"] = float(np.mean(arr))
+        out[f"reward/{short}/min"] = float(np.min(arr))
+        out[f"reward/{short}/max"] = float(np.max(arr))
+    return out
+
+
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
     """
@@ -98,6 +134,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - critic/vf_explained_var: Explained variance of the value function (if use_critic=True)
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
+            - reward/outcome|format|combined|format_*: Decomposition from
+              ``EpisodeRewardManager`` when present in ``non_tensor_batch`` (mean/min/max per step).
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -185,6 +223,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         # "episode/tool_call_count/min":
         #     batch.non_tensor_batch["tool_callings"][unique_idx].min().item(),
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if "success_rate" in k}),
+        **_reward_decomposition_metrics(batch),
     }
     return metrics
 
