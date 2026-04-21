@@ -3,6 +3,8 @@
 # Format rewards aligned with env projection:
 # - Default benches: ``<think>``, ``<action>``, optional ``<memory_retrieve>``.
 # - Search bench: ``<think>``, exclusive ``<search>`` xor ``<answer>`` (see ``search_projection``).
+# Segment caps (see ``max_*_segments`` in config): AlfWorld projection uses the first ``<action>`` pair only;
+# ``MemoryManager.extract_query`` uses the first retrieval block only — rewards should not treat duplicates as valid.
 
 from __future__ import annotations
 
@@ -20,6 +22,10 @@ FORMAT_REWARD_EXTRA_KEYS = (
     "format_think_ok",
     "format_action_ok",
     "format_memory_ok",
+    "format_think_over_limit",
+    "format_action_over_limit",
+    "format_memory_over_limit",
+    "format_protocol_hard_zero",
 )
 
 
@@ -51,6 +57,37 @@ def _valid_segments(text: str, open_tag: str, close_tag: str, min_chars: int) ->
     return len([b for b in blocks if len(b.strip()) >= min_chars])
 
 
+def _bounded_count_ok(
+    n: int,
+    *,
+    at_least: int,
+    at_most: int,
+) -> tuple[float, bool]:
+    """Return (ok 0/1, over_limit). ``at_most <= 0`` disables the upper bound."""
+    if at_most <= 0:
+        return (1.0 if n >= at_least else 0.0, False)
+    if n < at_least:
+        return (0.0, False)
+    if n > at_most:
+        return (0.0, True)
+    return (1.0, False)
+
+
+def _optional_memory_ok(
+    mem_n: int,
+    *,
+    max_segments: int,
+) -> tuple[float, bool]:
+    """When memory retrieve is optional: 0 blocks ok; if any, require 1..max when max>0."""
+    if max_segments <= 0:
+        return (1.0, False)
+    if mem_n == 0:
+        return (1.0, False)
+    if mem_n > max_segments:
+        return (0.0, True)
+    return (1.0, False)
+
+
 def _has_chinese(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text))
 
@@ -70,6 +107,9 @@ def compute_generic_action_think_memory_format_reward(
     weight_action: float,
     weight_memory: float,
     penalize_chinese_chars: bool,
+    max_think_segments: int = 0,
+    max_action_segments: int = 1,
+    max_memory_retrieve_segments: int = 1,
 ) -> GenericFormatRewardOutput:
     text = response_str or ""
     metrics = _zero_metrics()
@@ -87,14 +127,33 @@ def compute_generic_action_think_memory_format_reward(
     metrics["format_action_count"] = action_n
     metrics["format_memory_retrieve_count"] = mem_n
 
-    think_ok = 1.0 if think_n > 0 else 0.0
-    action_ok = 1.0 if action_n > 0 else 0.0
+    think_ok, think_over = _bounded_count_ok(think_n, at_least=1, at_most=max_think_segments)
+    action_ok, action_over = _bounded_count_ok(action_n, at_least=1, at_most=max_action_segments)
+
     if require_memory_retrieve:
-        mem_ok = 1.0 if mem_n > 0 else 0.0
+        mem_ok, mem_over = _bounded_count_ok(mem_n, at_least=1, at_most=max_memory_retrieve_segments)
         w_mem = weight_memory
     else:
-        mem_ok = 1.0
+        mem_ok, mem_over = _optional_memory_ok(mem_n, max_segments=max_memory_retrieve_segments)
         w_mem = 0.0
+
+    metrics["format_think_over_limit"] = int(think_over)
+    metrics["format_action_over_limit"] = int(action_over)
+    metrics["format_memory_over_limit"] = int(mem_over)
+
+    optional_memory_overflow = (
+        not require_memory_retrieve
+        and w_mem <= 0.0
+        and max_memory_retrieve_segments > 0
+        and mem_over
+    )
+    metrics["format_protocol_hard_zero"] = int(optional_memory_overflow)
+
+    if optional_memory_overflow:
+        metrics["format_think_ok"] = int(think_ok)
+        metrics["format_action_ok"] = int(action_ok)
+        metrics["format_memory_ok"] = int(mem_ok)
+        return GenericFormatRewardOutput(reward=0.0, metrics=metrics)
 
     denom = weight_think + weight_action + w_mem
     score = (weight_think * think_ok + weight_action * action_ok + w_mem * mem_ok) / denom
@@ -121,6 +180,8 @@ def compute_search_think_memory_format_reward(
     weight_protocol: float,
     weight_memory: float,
     penalize_chinese_chars: bool,
+    max_think_segments: int = 0,
+    max_memory_retrieve_segments: int = 1,
 ) -> GenericFormatRewardOutput:
     """Match ``search_projection`` validity: one of search xor answer, non-empty body, no duplicate / mixed tags."""
     text = response_str or ""
@@ -169,13 +230,31 @@ def compute_search_think_memory_format_reward(
     metrics["format_action_count"] = int(protocol_ok)
     metrics["format_memory_retrieve_count"] = mem_n
 
-    think_ok = 1.0 if think_n > 0 else 0.0
+    think_ok, think_over = _bounded_count_ok(think_n, at_least=1, at_most=max_think_segments)
     if require_memory_retrieve:
-        mem_ok = 1.0 if mem_n > 0 else 0.0
+        mem_ok, mem_over = _bounded_count_ok(mem_n, at_least=1, at_most=max_memory_retrieve_segments)
         w_mem = weight_memory
     else:
-        mem_ok = 1.0
+        mem_ok, mem_over = _optional_memory_ok(mem_n, max_segments=max_memory_retrieve_segments)
         w_mem = 0.0
+
+    metrics["format_think_over_limit"] = int(think_over)
+    metrics["format_action_over_limit"] = 0
+    metrics["format_memory_over_limit"] = int(mem_over)
+
+    optional_memory_overflow = (
+        not require_memory_retrieve
+        and w_mem <= 0.0
+        and max_memory_retrieve_segments > 0
+        and mem_over
+    )
+    metrics["format_protocol_hard_zero"] = int(optional_memory_overflow)
+
+    if optional_memory_overflow:
+        metrics["format_think_ok"] = int(think_ok)
+        metrics["format_action_ok"] = int(protocol_ok)
+        metrics["format_memory_ok"] = int(mem_ok)
+        return GenericFormatRewardOutput(reward=0.0, metrics=metrics)
 
     denom = weight_think + weight_protocol + w_mem
     score = (weight_think * think_ok + weight_protocol * protocol_ok + w_mem * mem_ok) / denom
@@ -183,3 +262,136 @@ def compute_search_think_memory_format_reward(
     metrics["format_action_ok"] = int(protocol_ok)
     metrics["format_memory_ok"] = int(mem_ok)
     return GenericFormatRewardOutput(reward=float(score), metrics=metrics)
+
+
+def _run_self_tests() -> None:
+    T = dict(
+        min_segment_chars=3,
+        require_memory_retrieve=False,
+        memory_open_tag="<memory_retrieve>",
+        memory_close_tag="</memory_retrieve>",
+        think_open_tag="<think>",
+        think_close_tag="</think>",
+        action_open_tag="<action>",
+        action_close_tag="</action>",
+        weight_think=1.0,
+        weight_action=1.0,
+        weight_memory=1.0,
+        penalize_chinese_chars=False,
+        max_think_segments=0,
+        max_action_segments=1,
+        max_memory_retrieve_segments=1,
+    )
+
+    def g(text: str, **over) -> GenericFormatRewardOutput:
+        kw = {**T, **over}
+        return compute_generic_action_think_memory_format_reward(text, **kw)
+
+    # 1) 单步合法：think + action（段内长度 >= min_segment_chars）
+    o1 = g("<think>abc</think><action>goto</action>")
+    assert o1.reward == 1.0, o1
+
+    # 2) 两个 action：超限，加权后 0.5
+    o2 = g(
+        "<think>abc</think>"
+        "<action>one</action><action>two</action>",
+    )
+    assert abs(o2.reward - 0.5) < 1e-9 and o2.metrics["format_action_over_limit"] == 1, o2
+
+    # 3) 可选记忆但两段检索：整段格式分为 0
+    o3 = g(
+        "<think>abc</think><action>run</action>"
+        "<memory_retrieve>que1</memory_retrieve><memory_retrieve>que2</memory_retrieve>",
+    )
+    assert o3.reward == 0.0 and o3.metrics["format_protocol_hard_zero"] == 1, o3
+
+    # 4) 必选记忆 + 单段：满分
+    o4 = compute_generic_action_think_memory_format_reward(
+        "<think>abc</think><action>run</action>"
+        "<memory_retrieve>query</memory_retrieve>",
+        **{**T, "require_memory_retrieve": True},
+    )
+    assert o4.reward == 1.0, o4
+
+    # 5) 必选记忆 + 两段检索：记忆超限
+    o5 = compute_generic_action_think_memory_format_reward(
+        "<think>abc</think><action>run</action>"
+        "<memory_retrieve>que1</memory_retrieve><memory_retrieve>que2</memory_retrieve>",
+        **{**T, "require_memory_retrieve": True},
+    )
+    assert o5.metrics["format_memory_over_limit"] == 1 and o5.reward < 1.0, o5
+
+    # 5b) 上限=2 却出现 3 段有效检索：必选记忆下 mem_ok=0，格式分 = (1+1+0)/3
+    o5b = compute_generic_action_think_memory_format_reward(
+        "<think>abc</think><action>run</action>"
+        "<memory_retrieve>que1</memory_retrieve>"
+        "<memory_retrieve>que2</memory_retrieve>"
+        "<memory_retrieve>que3</memory_retrieve>",
+        **{**T, "require_memory_retrieve": True, "max_memory_retrieve_segments": 2},
+    )
+    assert o5b.metrics["format_memory_over_limit"] == 1 and o5b.metrics["format_memory_retrieve_count"] == 3, o5b
+    assert abs(o5b.reward - 2.0 / 3.0) < 1e-9, o5b
+
+    # 5c) 可选记忆 + 三段检索：超过 max_memory_retrieve_segments=1，整段格式分硬清零
+    o5c = g(
+        "<think>abc</think><action>run</action>"
+        "<memory_retrieve>que1</memory_retrieve>"
+        "<memory_retrieve>que2</memory_retrieve>"
+        "<memory_retrieve>que3</memory_retrieve>",
+    )
+    assert o5c.reward == 0.0 and o5c.metrics["format_protocol_hard_zero"] == 1, o5c
+
+    # 6) max_action_segments=0：允许多 action（legacy）
+    o6 = g(
+        "<think>abc</think>"
+        "<action>aaa</action><action>bbb</action>",
+        max_action_segments=0,
+    )
+    assert abs(o6.reward - 1.0) < 1e-9, o6
+
+    # 7) Search 台：think + 单次 search
+    S = dict(
+        min_segment_chars=3,
+        require_memory_retrieve=False,
+        memory_open_tag="<memory_retrieve>",
+        memory_close_tag="</memory_retrieve>",
+        think_open_tag="<think>",
+        think_close_tag="</think>",
+        search_open_tag="<search>",
+        search_close_tag="</search>",
+        answer_open_tag="<answer>",
+        answer_close_tag="</answer>",
+        weight_think=1.0,
+        weight_protocol=1.0,
+        weight_memory=1.0,
+        penalize_chinese_chars=False,
+        max_think_segments=0,
+        max_memory_retrieve_segments=1,
+    )
+    s1 = compute_search_think_memory_format_reward(
+        "<think>abc</think><search>find it</search>",
+        **S,
+    )
+    assert abs(s1.reward - 1.0) < 1e-9, s1
+
+    # 8) Search：search 与 answer 同时出现 -> protocol 无效
+    s2 = compute_search_think_memory_format_reward(
+        "<think>abc</think>"
+        "<search>foo</search><answer>bar</answer>",
+        **S,
+    )
+    assert s2.metrics["format_action_ok"] == 0 and s2.reward < 1.0, s2
+
+    # 9) 中文惩罚
+    o7 = g("<think>abc</think><action>run</action>中文", penalize_chinese_chars=True)
+    assert o7.reward == 0.0 and o7.metrics["format_penalized_chinese"] == 1, o7
+
+    # 10) 数据源子串
+    assert use_search_format_reward("my_search_task", ["search"]) is True
+    assert use_search_format_reward("alfworld", ["search"]) is False
+
+    print("format_reward self-tests: OK (12 checks)")
+
+
+if __name__ == "__main__":
+    _run_self_tests()

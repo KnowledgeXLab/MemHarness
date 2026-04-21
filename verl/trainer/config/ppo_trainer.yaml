@@ -251,6 +251,11 @@ reward_model:
     weight_outcome: 1.0
     # Set > 0 to compute format and add ``weight_outcome * outcome + weight_format * format`` on the last response token.
     weight_format: 0.1
+    # Upper bounds on **valid** (min_segment_chars) segments per response. 0 = no upper cap.
+    # AlfWorld ``alfworld_projection`` / memory ``extract_query`` only consume the first block; extras are protocol drift.
+    max_think_segments: 0
+    max_action_segments: 1
+    max_memory_retrieve_segments: 6
     search_data_source_substrings:
       - search
     min_segment_chars: 5
@@ -359,6 +364,9 @@ env:
     #     global_step_end: null
     #     mode: agentic
     retrieval_mode_phases: null
+    # When true, log trainer_global_step, resolved retrieval_mode, and a short retrieve query preview
+    # on each MemoryManager.retrieve (can be noisy).
+    debug_retrieval: false
     backend: milvus   # Memory backend type. "milvus" for local VDB, "http" for remote/local service.
     auto_start_server: True   # Whether to auto-start a local HTTP memory service.
     mode: init_if_missing   # Initialization mode for the vector store.
@@ -412,7 +420,7 @@ env:
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
       clear_every_n_global_steps: 0  # 0 = disabled; if >0, drops and recreates empty collection every N steps (runs before prune).
-    count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
+    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
     server_advertised_host: null   # Host advertised to workers; auto-detected when null.

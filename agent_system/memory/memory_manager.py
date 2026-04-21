@@ -250,6 +250,16 @@ class MemoryManager:
         if not query_text:
             return "", None
 
+        if bool(self.config.get("debug_retrieval", False)):
+            logger.info(
+                "memory.retrieve preview: trainer_global_step=%s resolved_retrieval_mode=%s "
+                "query_len=%s query_preview=%r",
+                self._trainer_global_step,
+                self.retrieval_mode(),
+                len(query_text),
+                truncate_text(query_text, 120),
+            )
+
         retrieved = self.store.retrieve(query_text=query_text)
         if not retrieved:
             return "", None

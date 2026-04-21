@@ -160,9 +160,11 @@ fi
 
 MEM_ADAPTOR_PHASES_CLI=()
 if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
+  # Hydra override 语法不认 JSON 的 ``["key":``；须用结构化列表 + 冒号后空格（``key: value``）。
+  # 勿写 ``{global_step_start:0,...}`` 无空格形式，否则曾被 OmegaConf 误解析成字符串列表。
   MEM_ADAPTOR_PHASES_CLI+=(
-    env.memory.retrieval_mode_phases='[{global_step_start:0,global_step_end:30,mode:fixed},{global_step_start:30,global_step_end:null,mode:agentic}]'
-    mem_adaptor.env_step_phases='[{global_step_start:0,global_step_end:30,env_step_start:1,env_step_end:31,env_step_every_n:1},{global_step_start:31,global_step_end:null,env_step_start:null,env_step_end:null,env_step_every_n:1}]'
+    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 30, mode: fixed}, {global_step_start: 30, global_step_end: null, mode: agentic}]'
+    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 30, env_step_start: 1, env_step_end: 31, env_step_every_n: 1}, {global_step_start: 31, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
   )
 fi
 

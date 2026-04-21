@@ -68,11 +68,11 @@ FORMAT_REQUIRE_MEMORY_RETRIEVE=True
 EXPERIENCE_UTILITY_ENABLE=True
 EXPERIENCE_UTILITY_UPDATE_ON_RETRIEVAL=True
 EXPERIENCE_UTILITY_UPDATE_ON_EPISODE_END=True
-EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=10
+EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver"
+EXPERIMENT_NAME="train_evolver-1"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
@@ -177,7 +177,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=8192 \
+      data.max_prompt_length=12288 \
       data.max_response_length=1024 \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
@@ -201,7 +201,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
       actor_rollout_ref.rollout.enforce_eager=False \
       actor_rollout_ref.rollout.free_cache_engine=False \
-      actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
+      actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
       actor_rollout_ref.rollout.val_kwargs.do_sample=True \
       actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -213,7 +213,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \
-      env.max_steps=30 \
+      env.max_steps=50 \
       env.memory.enabled="${MEMORY_ENABLED}" \
       env.memory.store_dir="${MEMORY_STORE_DIR}" \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \

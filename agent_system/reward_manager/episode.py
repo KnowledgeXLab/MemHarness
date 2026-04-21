@@ -111,6 +111,9 @@ class EpisodeRewardManager:
                 w_a = float(fr.weight_action)
                 w_m = float(fr.weight_memory)
                 pen_cn = bool(fr.penalize_chinese_chars)
+                max_think = int(fr.max_think_segments)
+                max_action = int(fr.max_action_segments)
+                max_mem_seg = int(fr.max_memory_retrieve_segments)
                 if use_search_format_reward(str(data_source), search_markers):
                     out = compute_search_think_memory_format_reward(
                         response_str,
@@ -128,6 +131,8 @@ class EpisodeRewardManager:
                         weight_protocol=w_a,
                         weight_memory=w_m,
                         penalize_chinese_chars=pen_cn,
+                        max_think_segments=max_think,
+                        max_memory_retrieve_segments=max_mem_seg,
                     )
                 else:
                     out = compute_generic_action_think_memory_format_reward(
@@ -144,6 +149,9 @@ class EpisodeRewardManager:
                         weight_action=w_a,
                         weight_memory=w_m,
                         penalize_chinese_chars=pen_cn,
+                        max_think_segments=max_think,
+                        max_action_segments=max_action,
+                        max_memory_retrieve_segments=max_mem_seg,
                     )
                 format_score = float(out.reward)
                 fmt_metrics = out.metrics
