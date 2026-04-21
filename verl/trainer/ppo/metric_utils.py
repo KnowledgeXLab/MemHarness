@@ -136,6 +136,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
             - reward/outcome|format|combined|format_*: Decomposition from
               ``EpisodeRewardManager`` when present in ``non_tensor_batch`` (mean/min/max per step).
+            - episode/memory_retrieval_count/mean|max|min: When ``memory_retrieval_counts`` is present
+              (multi-turn rollout), statistics over **unique trajectories** for total retrievals per episode.
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -225,6 +227,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if "success_rate" in k}),
         **_reward_decomposition_metrics(batch),
     }
+    # MemAdaptor: per-trajectory total memory retrievals (rollout_loop), one value per traj after dedupe.
+    if "memory_retrieval_counts" in batch.non_tensor_batch:
+        mrc = np.asarray(batch.non_tensor_batch["memory_retrieval_counts"], dtype=np.float64).reshape(-1)
+        um = mrc[unique_idx]
+        if um.size > 0:
+            metrics["episode/memory_retrieval_count/mean"] = float(np.mean(um))
+            metrics["episode/memory_retrieval_count/max"] = float(np.max(um))
+            metrics["episode/memory_retrieval_count/min"] = float(np.min(um))
     return metrics
 
 

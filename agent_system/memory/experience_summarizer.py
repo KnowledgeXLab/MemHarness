@@ -440,7 +440,7 @@ def _prepare_trajectory_text_for_summarizer(
         return None
 
     coverage = _coverage_note_from_meta(meta, es)
-    budget = _vllm_rollout_max_prompt_tokens(config)
+    budget = _summarizer_max_prompt_tokens(config)
 
     if bool(es.summarizer_trajectory_token_trim):
         return _trim_ordered_steps_to_prompt_token_budget(
@@ -666,6 +666,42 @@ def _vllm_rollout_max_prompt_tokens(config: DictConfig) -> int:
     return max(1, mml - roll_resp)
 
 
+def _summarizer_max_prompt_tokens(config: DictConfig) -> int:
+    """
+    Token budget for experience summarization only (trajectory trim + self-mode prompt encoding).
+
+    Multi-turn rollout still uses ``config.data.max_prompt_length``. To summarize with a **larger**
+    prompt than rollout, set ``actor_rollout_ref.rollout.max_model_len`` to at least
+    ``summarizer_max_prompt_tokens + rollout.response_length``, and set
+    ``env.memory.experience_summarizer.summarizer_max_prompt_tokens`` to the desired trim target
+    (clamped to ``max_model_len - response_length``).
+
+    When ``summarizer_max_prompt_tokens`` is null or non-positive, uses the full engine cap from
+    :func:`_vllm_rollout_max_prompt_tokens`.
+    """
+    engine_cap = _vllm_rollout_max_prompt_tokens(config)
+    es = OmegaConf.select(config, "env.memory.experience_summarizer")
+    if es is None:
+        return engine_cap
+    raw = OmegaConf.select(es, "summarizer_max_prompt_tokens", default=None)
+    if raw is None:
+        return engine_cap
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return engine_cap
+    if v <= 0:
+        return engine_cap
+    if v > engine_cap:
+        logger.warning(
+            "experience_summarizer: summarizer_max_prompt_tokens=%s exceeds vLLM prompt cap %s "
+            "(raise actor_rollout_ref.rollout.max_model_len); clamping.",
+            v,
+            engine_cap,
+        )
+    return min(v, engine_cap)
+
+
 def _summarize_batch_self(
     *,
     prompts: List[str],
@@ -675,7 +711,7 @@ def _summarize_batch_self(
     actor_rollout_wg,
 ) -> List[str]:
     """Summarize trajectories using the actor rollout worker."""
-    max_prompt_length = _vllm_rollout_max_prompt_tokens(config)
+    max_prompt_length = _summarizer_max_prompt_tokens(config)
     truncation = "right"
     ro = OmegaConf.select(config, "actor_rollout_ref.rollout")
     response_length = int(ro.response_length) if ro is not None else int(config.data.max_response_length)

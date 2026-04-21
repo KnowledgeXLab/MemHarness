@@ -7,7 +7,7 @@
 # 论文框架见 https://arxiv.org/abs/2510.16079
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.45:8265'
+export RAY_ADDRESS='http://10.140.37.91:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -47,21 +47,21 @@ EMBEDDING_API_KEY="DataFrontier_bge_m3"
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-18"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
 
-# MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
-MEMORY_REBUILD_SOURCE_PATH=""
+MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
+# MEMORY_REBUILD_SOURCE_PATH=""
 
 # --- reward_model.format_reward：与 projection 对齐的 think / action / memory_retrieve shaping ---
 # 见 verl/trainer/config/ppo_trainer.yaml ``reward_model.format_reward``；此处用 Hydra 覆盖。
-FORMAT_REWARD_ENABLE=True
+FORMAT_REWARD_ENABLE=False
 FORMAT_WEIGHT_OUTCOME=1.0
 FORMAT_WEIGHT_FORMAT=0.1
 # agentic 检索时建议 True，要求响应里出现成对 memory 检索标签（与 env.memory.retrieval_query_* 一致）。
-FORMAT_REQUIRE_MEMORY_RETRIEVE=True
+FORMAT_REQUIRE_MEMORY_RETRIEVE=False
 
 # --- env.memory.experience_utility：EvolveR 式 c_use/c_succ + Laplace 写回 value，可选剪枝 ---
 # prune_every_n_global_steps=0 表示不剪枝；设为正整数则每 N 个 trainer step 剪一次低分记忆。
@@ -72,7 +72,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-1"
+EXPERIMENT_NAME="train_evolver-2"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
@@ -177,8 +177,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=12288 \
-      data.max_response_length=1024 \
+      data.max_prompt_length=2048 \
+      data.max_response_length=512 \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
@@ -197,7 +197,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+      actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
       actor_rollout_ref.rollout.enforce_eager=False \
       actor_rollout_ref.rollout.free_cache_engine=False \
@@ -219,6 +219,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
       env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
+      env.memory.experience_summarizer.summarizer_max_prompt_tokens=12288 \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \

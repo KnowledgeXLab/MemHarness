@@ -25,7 +25,7 @@ log_err() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
 }
 
-INTERVAL_MIN="${1:-5}"
+INTERVAL_MIN="${1:-3}"
 WANDB_ROOT="${2:-./wandb}"
 
 if ! [[ "${INTERVAL_MIN}" =~ ^[0-9]+$ ]] || [ "${INTERVAL_MIN}" -lt 1 ]; then

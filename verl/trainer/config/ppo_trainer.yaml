@@ -396,6 +396,9 @@ env:
       summarizer_trajectory_min_turns_kept: 8
       summarizer_trajectory_token_trim: true
       summarizer_trajectory_include_coverage_note: true
+      # Summarizer-only prompt token budget (trajectory trim + mode=self encoding). Null = use full vLLM cap
+      # (max_model_len - response_length). Multi-turn still uses data.max_prompt_length.
+      summarizer_max_prompt_tokens: null
       temperature: 0.6
       top_p: 1.0
       do_sample: True

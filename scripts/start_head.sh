@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=adaptor
+#SBATCH --job-name=evolver-2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=128
 #SBATCH --gpus-per-task=8
