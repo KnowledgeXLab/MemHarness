@@ -386,7 +386,7 @@ class MemoryManager:
         Expected kwargs from ``TrajectoryCollector`` / env manager:
         ``config``, ``tokenizer``, ``actor_rollout_wg`` (for mode=self),
         ``total_batch_list``, ``total_infos``, ``episode_rewards``, ``episode_lengths``,
-        ``success``, ``traj_uid``.
+        ``success``, ``traj_uid``, optional ``grpo_group_uid`` (same layout as rollout env batch).
 
         Heavy lifting lives in ``agent_system.memory.experience_summarizer`` to keep this file readable.
         """
@@ -421,6 +421,7 @@ class MemoryManager:
             success=success,
             traj_uid=traj_uid,
             trainer_global_step=trainer_global_step,
+            grpo_group_uid=kwargs.get("grpo_group_uid"),
         )
 
         self._apply_episode_utility_updates(

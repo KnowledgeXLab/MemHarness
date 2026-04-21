@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import uuid
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -471,6 +472,88 @@ def _episode_success(success: Dict[str, np.ndarray], index: int) -> bool:
         except Exception:
             return bool(a[index])
     return False
+
+
+def _grpo_group_key_for_env(
+    env_i: int,
+    grpo_group_uid: np.ndarray | None,
+    total_batch_list: List[List[Dict[str, Any]]],
+) -> str:
+    if grpo_group_uid is not None and env_i < len(grpo_group_uid):
+        return str(grpo_group_uid[env_i])
+    steps = total_batch_list[env_i] if 0 <= env_i < len(total_batch_list) else []
+    if steps and isinstance(steps[0], dict):
+        u = steps[0].get("uid")
+        if u is not None:
+            return str(u)
+    return f"singleton:{env_i}"
+
+
+def _select_env_indices_balanced_success_fail(
+    items: List[Tuple[int, bool]],
+    k: int,
+    rng: np.random.Generator,
+) -> List[int]:
+    """Pick ``k`` env indices, preferring equal success / failure when possible; fill from the larger remainder pool."""
+    if k <= 0:
+        return []
+    if k >= len(items):
+        return [ei for ei, _ in items]
+    S = [ei for ei, s in items if s]
+    F = [ei for ei, s in items if not s]
+    s_want = k // 2
+    f_want = k - s_want
+    rng.shuffle(S)
+    rng.shuffle(F)
+    s_take = min(s_want, len(S))
+    f_take = min(f_want, len(F))
+    chosen = S[:s_take] + F[:f_take]
+    need = k - len(chosen)
+    if need > 0:
+        rest_S = S[s_take:]
+        rest_F = F[f_take:]
+        if len(rest_S) > len(rest_F):
+            pool = list(rest_S)
+        elif len(rest_F) > len(rest_S):
+            pool = list(rest_F)
+        else:
+            pool = list(rest_S + rest_F)
+        rng.shuffle(pool)
+        chosen.extend(pool[:need])
+    return chosen
+
+
+def _subsample_grpo_writeback_candidates(
+    candidates: List[Dict[str, Any]],
+    *,
+    group_n: int,
+    keep_fraction: float,
+    grpo_group_uid: np.ndarray | None,
+    total_batch_list: List[List[Dict[str, Any]]],
+    rng: np.random.Generator,
+) -> List[Dict[str, Any]]:
+    if group_n <= 1 or keep_fraction >= 1.0 - 1e-12:
+        return candidates
+
+    groups: dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for c in candidates:
+        gk = _grpo_group_key_for_env(int(c["env_i"]), grpo_group_uid, total_batch_list)
+        groups[gk].append(c)
+
+    out: List[Dict[str, Any]] = []
+    k_nominal = int(max(0, min(group_n, int(np.round(group_n * float(keep_fraction))))))
+    for _gk, grp in groups.items():
+        m = len(grp)
+        k = min(m, k_nominal)
+        if k >= m:
+            out.extend(grp)
+            continue
+        if k <= 0:
+            continue
+        items = [(int(c["env_i"]), bool(c["succ"])) for c in grp]
+        picked = set(_select_env_indices_balanced_success_fail(items, k, rng))
+        out.extend([c for c in grp if int(c["env_i"]) in picked])
+    return out
 
 
 def _dataset_item_id_from_infos(total_infos: List[List[Dict[str, Any]]], env_index: int) -> Any:
@@ -1077,6 +1160,7 @@ def maybe_summarize_and_write_experiences(
     success: Dict[str, np.ndarray],
     traj_uid: np.ndarray,
     trainer_global_step: int | None = None,
+    grpo_group_uid: np.ndarray | None = None,
 ) -> int:
     """
     Implementation for ``MemoryManager.maybe_write_rollout_memories`` (also usable directly in tests).
@@ -1089,6 +1173,10 @@ def maybe_summarize_and_write_experiences(
 
     Episodes with no summarizer prompt after prepare are skipped (no vector insert). Full-trajectory archival is
     left to a future path; see ``_raw_trajectory_fallback_memory_record`` for a possible row shape.
+
+    When ``env.rollout.n`` > 1 and ``experience_summarizer.grpo_summarize_keep_fraction`` < 1, candidates that
+    passed the filters are subsampled per GRPO group (``grpo_group_uid`` or per-step ``uid``): keep at most
+    ``round(rollout.n * fraction)`` trajectories per group, balancing success/failure when possible.
     """
     if not experience_summarizer_active(config):
         return 0
@@ -1120,10 +1208,16 @@ def maybe_summarize_and_write_experiences(
     max_mem = int(mem.max_memory_chars)
 
     batch_size = len(total_batch_list)
-    trajectory_user_messages: List[str] = []
-    pending_rollouts: List[Tuple[int, str, float, bool, str, int, Any]] = []
-    pending_steps: List[List[Dict[str, Any]]] = []
+    uid_arr = grpo_group_uid
+    if uid_arr is not None and len(uid_arr) != batch_size:
+        logger.warning(
+            "experience_summarizer: grpo_group_uid length %s != batch_size %s; ignoring group ids for subsample.",
+            len(uid_arr),
+            batch_size,
+        )
+        uid_arr = None
 
+    candidates: List[Dict[str, Any]] = []
     for i in range(batch_size):
         steps = total_batch_list[i]
         if not steps:
@@ -1171,9 +1265,42 @@ def maybe_summarize_and_write_experiences(
         except KeyError as e:
             logger.warning("experience_summarizer: template placeholder missing: %s; skip env %s.", e, i)
             continue
-        trajectory_user_messages.append(user_message)
-        pending_rollouts.append((i, traj_s, r, succ, traj_for_llm, len(traj_full_plain), dataset_item_id))
-        pending_steps.append(list(steps))
+        candidates.append(
+            {
+                "env_i": int(i),
+                "succ": bool(succ),
+                "user_message": user_message,
+                "pending_rollout": (i, traj_s, r, succ, traj_for_llm, len(traj_full_plain), dataset_item_id),
+                "pending_steps": list(steps),
+            }
+        )
+
+    group_n = max(1, int(config.env.rollout.n))
+    keep_fraction = float(es.get("grpo_summarize_keep_fraction", 1.0))
+    if group_n > 1 and keep_fraction < 1.0 - 1e-12:
+        n_before = len(candidates)
+        env_seed = int(getattr(config.env, "seed", 0) or 0)
+        ts = int(trainer_global_step) if trainer_global_step is not None else 0
+        rng = np.random.default_rng((env_seed * 1009 + ts * 9176 + group_n) & 0x7FFFFFFF)
+        candidates = _subsample_grpo_writeback_candidates(
+            candidates,
+            group_n=group_n,
+            keep_fraction=keep_fraction,
+            grpo_group_uid=uid_arr,
+            total_batch_list=total_batch_list,
+            rng=rng,
+        )
+        logger.info(
+            "experience_summarizer: grpo_writeback_subsample keep_fraction=%s group_n=%s candidates %s -> %s",
+            keep_fraction,
+            group_n,
+            n_before,
+            len(candidates),
+        )
+
+    trajectory_user_messages = [str(c["user_message"]) for c in candidates]
+    pending_rollouts = [c["pending_rollout"] for c in candidates]
+    pending_steps = [c["pending_steps"] for c in candidates]
 
     if not trajectory_user_messages:
         return 0
