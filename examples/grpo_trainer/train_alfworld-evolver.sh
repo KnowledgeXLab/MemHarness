@@ -52,8 +52,8 @@ MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
 
-MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
-# MEMORY_REBUILD_SOURCE_PATH=""
+# MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
+MEMORY_REBUILD_SOURCE_PATH=""
 
 # --- reward_model.format_reward：与 projection 对齐的 think / action / memory_retrieve shaping ---
 # 见 verl/trainer/config/ppo_trainer.yaml ``reward_model.format_reward``；此处用 Hydra 覆盖。
@@ -72,7 +72,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-2"
+EXPERIMENT_NAME="train_evolver-3"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
@@ -96,6 +96,16 @@ echo "[log] Writing full run output to: ${LOG_FILE}"
 train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
 group_size=8
+
+# 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
+# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
+DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
+DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
+SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
+if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
+  ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
+fi
 
 # 与 trainer_n_gpus_per_node、模型宽度匹配（单卡可设 1）
 tensor_model_parallel_size=2
@@ -177,8 +187,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=2048 \
-      data.max_response_length=512 \
+      data.max_prompt_length="${DATA_MAX_PROMPT_LENGTH}" \
+      data.max_response_length="${DATA_MAX_RESPONSE_LENGTH}" \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
@@ -196,6 +206,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
+      actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
@@ -219,7 +230,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
       env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
-      env.memory.experience_summarizer.summarizer_max_prompt_tokens=12288 \
+      env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \

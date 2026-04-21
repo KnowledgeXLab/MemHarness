@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 
 from omegaconf import DictConfig, OmegaConf
@@ -18,6 +19,11 @@ from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
 
 logger = logging.getLogger(__name__)
+
+# Aligns with ``mem_adaptor.no_experience_message`` default in ``verl/trainer/config/ppo_trainer.yaml``.
+_DEFAULT_EMPTY_RETRIEVAL_MESSAGE = (
+    "(No validated memory principle applies; rely on observation and reasoning.)"
+)
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -41,6 +47,10 @@ class MemoryManager:
         self._trainer_global_step: int | None = None
         self.enabled = bool(memory_config.enabled)
         self.store = None
+        self._timing_retrieve_sec: float = 0.0
+        self._timing_retrieve_calls: int = 0
+        self._timing_retrieval_utility_sec: float = 0.0
+        self._timing_retrieval_utility_calls: int = 0
 
         if not self.enabled:
             return
@@ -126,6 +136,51 @@ class MemoryManager:
     def experience_utility_enabled(self) -> bool:
         return bool(self._experience_utility_cfg().get("enable"))
 
+    def _log_operation_timing(self) -> bool:
+        if self.config is None:
+            return False
+        return bool(self.config.get("log_operation_timing", True))
+
+    def _empty_retrieval_injected_text(self) -> str:
+        if self.config is None:
+            return _DEFAULT_EMPTY_RETRIEVAL_MESSAGE
+        raw = self.config.get("empty_retrieval_message")
+        msg = str(raw).strip() if raw is not None else ""
+        return msg if msg else _DEFAULT_EMPTY_RETRIEVAL_MESSAGE
+
+    def _flush_retrieval_rollup_timings(self, trainer_global_step: int | None) -> None:
+        """Emit one line per rollout batch for retrieve / retrieval-utility latency (if enabled)."""
+        if not self._log_operation_timing():
+            self._timing_retrieve_sec = 0.0
+            self._timing_retrieve_calls = 0
+            self._timing_retrieval_utility_sec = 0.0
+            self._timing_retrieval_utility_calls = 0
+            return
+        step_s = "" if trainer_global_step is None else str(int(trainer_global_step))
+        if self._timing_retrieve_calls:
+            mean = self._timing_retrieve_sec / max(1, self._timing_retrieve_calls)
+            logger.info(
+                "memory.timing op=retrieve_aggregate trainer_global_step=%s calls=%s total_sec=%.4f mean_sec=%.4f",
+                step_s,
+                self._timing_retrieve_calls,
+                self._timing_retrieve_sec,
+                mean,
+            )
+        if self._timing_retrieval_utility_calls:
+            mean_u = self._timing_retrieval_utility_sec / max(1, self._timing_retrieval_utility_calls)
+            logger.info(
+                "memory.timing op=retrieval_utility_update_aggregate trainer_global_step=%s calls=%s "
+                "total_sec=%.4f mean_sec=%.4f",
+                step_s,
+                self._timing_retrieval_utility_calls,
+                self._timing_retrieval_utility_sec,
+                mean_u,
+            )
+        self._timing_retrieve_sec = 0.0
+        self._timing_retrieve_calls = 0
+        self._timing_retrieval_utility_sec = 0.0
+        self._timing_retrieval_utility_calls = 0
+
     def _apply_retrieval_utility_updates(self, retrieved: list[RetrievedMemory]) -> None:
         if not self.experience_utility_enabled() or self.store is None:
             return
@@ -147,7 +202,12 @@ class MemoryManager:
                 }
             )
         if updates:
+            t0 = time.perf_counter()
             self.store.update_records(updates)
+            dt = time.perf_counter() - t0
+            if self._log_operation_timing():
+                self._timing_retrieval_utility_sec += dt
+                self._timing_retrieval_utility_calls += 1
 
     def _apply_episode_utility_updates(
         self,
@@ -184,7 +244,15 @@ class MemoryManager:
             if mid and delta > 0
         ]
         if updates:
+            t0 = time.perf_counter()
             self.store.update_records(updates)
+            if self._log_operation_timing():
+                logger.info(
+                    "memory.timing op=episode_utility_update trainer_global_step=%s rows=%s elapsed_sec=%.4f",
+                    vu_step,
+                    len(updates),
+                    time.perf_counter() - t0,
+                )
 
     def _maybe_run_experience_utility_maintenance(self, trainer_global_step: int | None) -> None:
         if not self.experience_utility_enabled() or self.store is None:
@@ -197,17 +265,27 @@ class MemoryManager:
         cfg = self._experience_utility_cfg()
         clear_every = int(cfg.get("clear_every_n_global_steps") or 0)
         if clear_every > 0 and step % clear_every == 0 and step != self._last_utility_clear_step:
+            t0 = time.perf_counter()
             self.store.clear_all_records()
+            dt = time.perf_counter() - t0
             self._last_utility_clear_step = step
             self._last_utility_prune_step = step
             logger.info("experience_utility: cleared memory store at global_step=%s", step)
+            if self._log_operation_timing():
+                logger.info(
+                    "memory.timing op=utility_clear trainer_global_step=%s elapsed_sec=%.4f",
+                    step,
+                    dt,
+                )
             return
 
         prune_every = int(cfg.get("prune_every_n_global_steps") or 0)
         if prune_every > 0 and step % prune_every == 0 and step != self._last_utility_prune_step:
             threshold = float(cfg.get("prune_score_threshold", 0.35))
             min_uses = int(cfg.get("min_uses_before_prune", 3))
+            t0 = time.perf_counter()
             deleted = self.store.prune_low_utility_memories(threshold, min_uses)
+            dt = time.perf_counter() - t0
             self._last_utility_prune_step = step
             logger.info(
                 "experience_utility: pruned %s memories (threshold=%s min_uses=%s) at global_step=%s",
@@ -216,6 +294,13 @@ class MemoryManager:
                 min_uses,
                 step,
             )
+            if self._log_operation_timing():
+                logger.info(
+                    "memory.timing op=utility_prune trainer_global_step=%s deleted=%s elapsed_sec=%.4f",
+                    step,
+                    deleted,
+                    dt,
+                )
 
     def append_retrieval_hint(self, prompt: str) -> str:
         if not self.enabled or not self.is_agentic_mode():
@@ -239,6 +324,7 @@ class MemoryManager:
         return injected_text
 
     def build_memory_message_and_event(self, state_text: str, query_text: str | None = None) -> tuple[str, MemoryEvent | None]:
+        empty_msg = self._empty_retrieval_injected_text()
         if self.store is None:
             return "", None
 
@@ -260,9 +346,22 @@ class MemoryManager:
                 truncate_text(query_text, 120),
             )
 
+        t0 = time.perf_counter()
         retrieved = self.store.retrieve(query_text=query_text)
+        if self._log_operation_timing():
+            self._timing_retrieve_sec += time.perf_counter() - t0
+            self._timing_retrieve_calls += 1
+
+        norm_state = normalize_text(state_text, max_chars=self.config.max_state_chars)
         if not retrieved:
-            return "", None
+            event = MemoryEvent(
+                event_type="retrieval",
+                query_text=query_text,
+                state_text=norm_state,
+                injected_text=empty_msg,
+                retrieved=[],
+            )
+            return empty_msg, event
 
         self._apply_retrieval_utility_updates(retrieved)
 
@@ -270,7 +369,7 @@ class MemoryManager:
         event = MemoryEvent(
             event_type="retrieval",
             query_text=query_text,
-            state_text=normalize_text(state_text, max_chars=self.config.max_state_chars),
+            state_text=norm_state,
             injected_text=injected_text,
             retrieved=[memory.to_dict() for memory in retrieved],
         )
@@ -308,6 +407,8 @@ class MemoryManager:
         success = kwargs.get("success") or {}
         trainer_global_step = kwargs.get("trainer_global_step")
 
+        self._flush_retrieval_rollup_timings(trainer_global_step)
+
         maybe_summarize_and_write_experiences(
             config=config,
             memory_manager=self,
@@ -319,6 +420,7 @@ class MemoryManager:
             episode_lengths=episode_lengths,
             success=success,
             traj_uid=traj_uid,
+            trainer_global_step=trainer_global_step,
         )
 
         self._apply_episode_utility_updates(

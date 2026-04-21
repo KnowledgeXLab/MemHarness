@@ -367,6 +367,10 @@ env:
     # When true, log trainer_global_step, resolved retrieval_mode, and a short retrieve query preview
     # on each MemoryManager.retrieve (can be noisy).
     debug_retrieval: false
+    # Injected when a retrieval query runs but the vector store returns no hits (aligns with mem_adaptor.no_experience_message).
+    empty_retrieval_message: "(No validated memory principle applies; rely on observation and reasoning.)"
+    # Log memory.timing lines for retrieve rollups, summarization, VDB insert, utility updates, clear/prune.
+    log_operation_timing: true
     backend: milvus   # Memory backend type. "milvus" for local VDB, "http" for remote/local service.
     auto_start_server: True   # Whether to auto-start a local HTTP memory service.
     mode: init_if_missing   # Initialization mode for the vector store.

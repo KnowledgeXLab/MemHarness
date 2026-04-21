@@ -1076,6 +1076,7 @@ def maybe_summarize_and_write_experiences(
     episode_lengths: np.ndarray,
     success: Dict[str, np.ndarray],
     traj_uid: np.ndarray,
+    trainer_global_step: int | None = None,
 ) -> int:
     """
     Implementation for ``MemoryManager.maybe_write_rollout_memories`` (also usable directly in tests).
@@ -1198,8 +1199,13 @@ def maybe_summarize_and_write_experiences(
             for user_msg in trajectory_user_messages
         ]
 
+    want_timing = rm._log_operation_timing()
+    step_s = "" if trainer_global_step is None else str(int(trainer_global_step))
+    infer_rounds = 0
+    t_infer_0 = time.perf_counter()
     try:
         while active:
+            infer_rounds += 1
             batch_out = _run_extraction_inference_for_indices(
                 active,
                 mode=mode,
@@ -1258,6 +1264,17 @@ def maybe_summarize_and_write_experiences(
         logger.exception("experience_summarizer failed during model calls; no records written.")
         return 0
 
+    t_infer_elapsed = time.perf_counter() - t_infer_0
+    if want_timing:
+        logger.info(
+            "memory.timing op=experience_summarize_infer trainer_global_step=%s pending_traj=%s "
+            "while_iterations=%s elapsed_sec=%.4f",
+            step_s,
+            n_pending,
+            infer_rounds,
+            t_infer_elapsed,
+        )
+
     records: List[MemoryRecord] = []
     for idx in range(n_pending):
         recs = _memory_records_from_extractor_output(
@@ -1279,8 +1296,17 @@ def maybe_summarize_and_write_experiences(
     if not records:
         return 0
     try:
+        t_ins_0 = time.perf_counter()
         rm.store.add_records(records)
+        ins_dt = time.perf_counter() - t_ins_0
         logger.info("experience_summarizer wrote %s memory record(s) (mode=%s).", len(records), mode)
+        if want_timing:
+            logger.info(
+                "memory.timing op=experience_summarize_insert trainer_global_step=%s records=%s elapsed_sec=%.4f",
+                step_s,
+                len(records),
+                ins_dt,
+            )
     except Exception:
         logger.exception("experience_summarizer failed to add_records.")
         return 0
