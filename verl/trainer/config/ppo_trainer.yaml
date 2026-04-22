@@ -161,6 +161,8 @@ actor_rollout_ref:
       max_retries: 2
       retry_backoff_sec: 1.0
       extra_headers: { }
+      extra_body: { }   # Extra JSON fields merged into /v1/chat/completions payload.
+      disable_thinking: null   # null -> auto disable for qwen3* models; true -> force add enable_thinking=false.
     multi_turn:
       enable: False  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
       max_turns: null  # null for no limit (default max_length // 3)
@@ -563,7 +565,11 @@ mem_adaptor:
   empty_output_markers:
     - "<EMPTY>"
     - "<empty>"
+  # On adaptor <EMPTY>, the <memory>...</memory> block is removed, then this string is appended to the observation text.
   no_experience_message: "(No validated memory principle applies; rely on observation and reasoning.)"
+  # One adaptor forward per retrieved hit; non-<EMPTY> outputs are merged with multi_hit_joiner. {index} is 1-based among accepted outputs only.
+  adapted_principle_label_template: "Adapted memory principle {index}:\n"
+  # Legacy: used only if adapted_principle_label_template is null or whitespace.
   adapted_injection_prefix: "Adapted memory principle:\n"
   placeholder_old_state: "(none)"
   placeholder_old_principle: "(none)"

@@ -378,7 +378,7 @@ class TrajectoryCollector:
         memory_retrieval_counts = np.zeros(batch_size, dtype=np.float32)
         count_query_as_step = bool(self.config.env.memory.count_query_as_step)
         max_env_steps = max(1, int(self.config.env.max_steps))
-        max_rollout_rounds = max_env_steps
+        max_rollout_rounds = max_env_steps + 6
         rollout_rounds = 0
         timing = {
             "preprocess": 0.0,

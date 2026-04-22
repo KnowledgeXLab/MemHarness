@@ -6,13 +6,13 @@ export RAY_ADDRESS='http://10.140.37.99:8265'
 # Reasoning：openai_api=外部 OpenAI 兼容 Chat API；Adaptor 仍用本地 vllm（mem_adaptor.local_rollout_name，见 main_ppo attach）
 ENGINE="openai_api"
 # 在下方填写 base_url、model；api_key 可在此填写，或留空并在提交前 export OPENAI_API_KEY（走 yaml 的 oc.env）
-REASONING_OPENAI_BASE_URL="http://35.220.164.252:3888/v1"
-REASONING_OPENAI_API_KEY="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH"
-REASONING_OPENAI_MODEL="gpt-4o-mini"
+REASONING_OPENAI_BASE_URL="http://10.140.37.43:8888/v1"
+REASONING_OPENAI_API_KEY="DataFrontier_qwen35_a3b"
+REASONING_OPENAI_MODEL="qwen3.5-35b-a3b"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="offline"
+export WANDB_MODE="online"
 
 # global_pool（Reasoning / Ref / Critic 等）每节点 GPU 数
 trainer_n_gpus_per_node=2
@@ -59,7 +59,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-11"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -93,8 +93,19 @@ echo "[log] Writing full run output to: ${LOG_FILE}"
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
 train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
-group_size=4
+group_size=8
 max_concurrent=32
+
+# 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
+# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
+# MemAdaptor 专用 vLLM 继承 actor_rollout_ref.rollout.max_model_len，此处与 evolver 脚本对齐。
+DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
+DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
+SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
+if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
+  ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
+fi
 
 # TP 与 GPU 数一致（单卡训练请保持1）
 tensor_model_parallel_size=1 ## 使用openai_api时，主rollout不使用TP，须为1
@@ -163,8 +174,8 @@ if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
   # Hydra override 语法不认 JSON 的 ``["key":``；须用结构化列表 + 冒号后空格（``key: value``）。
   # 勿写 ``{global_step_start:0,...}`` 无空格形式，否则曾被 OmegaConf 误解析成字符串列表。
   MEM_ADAPTOR_PHASES_CLI+=(
-    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 30, mode: fixed}, {global_step_start: 30, global_step_end: null, mode: agentic}]'
-    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 30, env_step_start: 1, env_step_end: 31, env_step_every_n: 1}, {global_step_start: 31, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
+    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
+    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
   )
 fi
 
@@ -175,8 +186,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=8192 \
-      data.max_response_length=512 \
+      data.max_prompt_length="${DATA_MAX_PROMPT_LENGTH}" \
+      data.max_response_length="${DATA_MAX_RESPONSE_LENGTH}" \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
@@ -194,6 +205,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
+      actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
@@ -222,6 +234,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
       env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
+      env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
       "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \

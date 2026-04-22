@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # MemAdaptor + AlfWorld：Reasoning policy 使用 **本地 HF + vLLM rollout**（非 openai_api）。
-# 与 train_alfworld-adaptor-remote.sh 结构一致；仅将主 policy 改为本地模型路径。
+# 与 train_alfworld-adaptor-remote.sh 对齐：冻结 actor（trainable=false）、只训 Adaptor；差异仅为 ENGINE=vllm + 无 openai_api。
 set -x
 set -euo pipefail
 export RAY_ADDRESS='http://10.140.37.99:8265'
@@ -11,11 +11,14 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
-REASONING_MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
+REASONING_MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
-MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
+MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
-# global_pool：Reasoning + Ref + Critic 等占用的每节点 GPU 数
+# --- 与 remote 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
+MEM_ADAPTOR_USE_RECOMMENDED_PHASES="1"
+
+# global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
 trainer_n_gpus_per_node=6
 # mem_adaptor 专用池每节点 GPU 数
 mem_adaptor_gpus_per_node=2
@@ -39,7 +42,7 @@ MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
-RETRIEVAL_MODE="fixed" # agentic | fixed
+RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 EMBEDDING_API_KEY="DataFrontier_bge_m3"
@@ -48,7 +51,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔节点名；留空则不排除（见 env.memory.remote_slurm_launch.exclude_nodes）
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-38"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-11"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -56,7 +59,7 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 # MEMORY_REBUILD_SOURCE_PATH=""
 
-EXPERIMENT_NAME="actor_qwen2.5-3b-train_adaptor"
+EXPERIMENT_NAME="actor_qwen2.5-1.5b-train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -69,18 +72,30 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
+mkdir -p "${TRAINER_CHECKPOINT_DIR}"
 LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_local_reasoning-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REASONING_MODEL_PATH=${REASONING_MODEL_PATH}"
 echo "[log] MEM_ADAPTOR_MODEL_PATH=${MEM_ADAPTOR_MODEL_PATH}"
+echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
-# 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配；交互式 env 保持 actor_rollout_ref.rollout.n=1（yaml 默认）
-train_data_size=16
+# 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
+train_data_size=18
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
-group_size=4
+group_size=8
+
+# 多轮只认 data.max_prompt_length；summarizer 需要更大 prompt 时须抬高 MemAdaptor 侧 vLLM max_model_len（见 experience_summarizer）
+DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
+DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
+SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
+if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
+  ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
+fi
 
 # vLLM TP；须与 Reasoning 池 GPU 布局一致（单卡填 1）
 tensor_model_parallel_size=2
@@ -139,6 +154,14 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
   fi
 fi
 
+MEM_ADAPTOR_PHASES_CLI=()
+if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
+  MEM_ADAPTOR_PHASES_CLI+=(
+    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
+    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
+  )
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -146,8 +169,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.val_files="${VAL_FILE}" \
       data.train_batch_size="${train_data_size}" \
       data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length=8192 \
-      data.max_response_length=512 \
+      data.max_prompt_length="${DATA_MAX_PROMPT_LENGTH}" \
+      data.max_response_length="${DATA_MAX_RESPONSE_LENGTH}" \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
@@ -165,8 +188,9 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
       actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
+      actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
+      actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
       actor_rollout_ref.rollout.enforce_eager=False \
       actor_rollout_ref.rollout.free_cache_engine=False \
@@ -191,8 +215,10 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
       env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
+      env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
+      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
       env.rollout.n="${group_size}" \
@@ -201,9 +227,10 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.logger=['console','wandb'] \
       trainer.project_name='MemAdaptor_alfworld' \
       trainer.experiment_name="${EXPERIMENT_NAME}" \
+      trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
       trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
       trainer.nnodes=1 \
-      trainer.save_freq=-1 \
+      trainer.save_freq=50 \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \

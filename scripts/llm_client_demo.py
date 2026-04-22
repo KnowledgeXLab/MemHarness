@@ -3,11 +3,11 @@ from openai import OpenAI
 
 
 
-def LLM_demo(human_input, model_name="qwen3_vl_8b_instruct", max_tokens=4096, temperature=0.7, top_p=0.9):
+def LLM_demo(human_input, model_name="qwen3.5-35b-a3b", max_tokens=4096, temperature=0.7, top_p=0.9):
 
     client = OpenAI(
-    api_key="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH", 
-    base_url="http://10.140.37.77:8081/v1/")
+    api_key="DataFrontier_qwen35_a3b", 
+    base_url="http://10.140.37.43:8888/v1")
 
     try:
         # 调用 Chat Completion API 并设置参数

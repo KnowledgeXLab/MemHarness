@@ -89,7 +89,7 @@ sync_from_list_file() {
   fi
 }
 
-INTERVAL_MIN="${1:-3}"
+INTERVAL_MIN="${1:-5}"
 
 if ! [[ "${INTERVAL_MIN}" =~ ^[0-9]+$ ]] || [ "${INTERVAL_MIN}" -lt 1 ]; then
   log_err "用法: $0 [间隔分钟数_n，默认 3]"

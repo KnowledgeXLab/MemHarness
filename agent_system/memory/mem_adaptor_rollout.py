@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -219,11 +220,16 @@ def build_adaptor_dataproto(
 
 
 def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> Tuple[str, bool]:
-    """Build merged replacement string and whether every hit is a reject (<EMPTY>)."""
+    """Build merged replacement string and whether every hit is a reject (<EMPTY>).
+
+    When ``adapted_principle_label_template`` is set (non-empty), each accepted output becomes
+    ``template`` with ``{index}`` -> 1-based hit index, then bodies are joined with ``multi_hit_joiner``.
+    Otherwise falls back to a single ``adapted_injection_prefix`` before joined bodies (legacy).
+    """
     markers = list(ma["empty_output_markers"])
     no_exp = str(ma["no_experience_message"]).strip()
-    prefix = str(ma["adapted_injection_prefix"])
     joiner = str(ma["multi_hit_joiner"])
+    label_tmpl_raw = ma.get("adapted_principle_label_template")
 
     cleaned_parts: List[str] = []
     any_accept = False
@@ -234,9 +240,20 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> T
             any_accept = True
 
     if not any_accept:
+        # Observation patching uses all_reject to strip <memory>...</memory>; keep message for config/docs only.
         rep = no_exp if no_exp else ""
         return rep, True
 
+    if label_tmpl_raw is not None and str(label_tmpl_raw).strip():
+        tmpl = str(label_tmpl_raw)
+        blocks: List[str] = []
+        for idx, part in enumerate(cleaned_parts):
+            lab = tmpl.replace("{index}", str(idx + 1))
+            blocks.append(f"{lab}{part.strip()}")
+        rep = joiner.join(blocks)
+        return rep, False
+
+    prefix = str(ma.get("adapted_injection_prefix", "") or "")
     body = joiner.join(cleaned_parts)
     if prefix and body:
         rep = f"{prefix}{body}"
@@ -245,6 +262,43 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> T
     else:
         rep = body
     return rep, False
+
+
+_MEMORY_BLOCK_RE = re.compile(r"<memory>\s*.*?\s*</memory>", re.DOTALL | re.IGNORECASE)
+
+
+def _splice_out_memory_block(text: str, injected_inner: str, new_inner: Optional[str]) -> str:
+    """Replace the last ``<memory>...</memory>`` block.
+
+    ``new_inner`` None or empty string => remove the block (and the boilerplate header/memories inside it).
+    Otherwise set inner content to ``new_inner`` (no extra wrapping).
+    """
+    t = text or ""
+    span: Optional[tuple[int, int]] = None
+    matches = list(_MEMORY_BLOCK_RE.finditer(t))
+    if matches:
+        span = matches[-1].span()
+    elif injected_inner:
+        for candidate in (
+            f"<memory>\n{injected_inner}\n</memory>",
+            f"<memory>\n{injected_inner.strip()}\n</memory>",
+        ):
+            s = t.rfind(candidate)
+            if s != -1:
+                span = (s, s + len(candidate))
+                break
+    if span is None:
+        return t
+    s, e = span
+    before = t[:s].rstrip()
+    after = t[e:].lstrip()
+    inner = (new_inner or "").strip()
+    if not inner:
+        parts = [p for p in (before, after) if p]
+        return "\n\n".join(parts) if parts else ""
+    block = f"<memory>\n{inner}\n</memory>"
+    parts = [p for p in (before, block, after) if p]
+    return "\n\n".join(parts)
 
 
 def _patch_one_obs_text(
@@ -256,28 +310,41 @@ def _patch_one_obs_text(
     raw_outputs: Sequence[str],
     all_reject: bool,
 ) -> None:
-    """replace original memory text with the replacement text modified by the adaptor."""
-    # TODO: check in the log
+    """Replace the last ``<memory>...</memory>`` inner with adaptor output; on <EMPTY> remove the block and append ``replacement`` (``no_experience_message``)."""
 
     infos[i]["mem_adaptor_raw_outputs"] = list(raw_outputs)
     infos[i]["mem_adaptor_raw_output"] = raw_outputs[0]
     infos[i]["mem_adaptor_reject"] = all_reject
 
     injected = infos[i]["memory_injected_text"].strip()
-    t = texts[i]
-    if injected:
-        needle = "\n\n" + injected
-        j = t.rfind(needle)
-        if j != -1:
-            texts[i] = t[:j] + (("\n\n" + replacement) if replacement else "")
-        elif replacement:
-            texts[i] = t + "\n\n" + replacement
-    else:
-        if replacement:
-            texts[i] = t + "\n\n" + replacement
+    t = texts[i] or ""
 
+    if all_reject:
+        new_t = _splice_out_memory_block(t, injected, None)
+        no_exp = (replacement or "").strip()
+        if no_exp:
+            new_t = new_t.rstrip() + "\n\n" + no_exp
+        texts[i] = new_t
+        infos[i]["mem_adaptor_applied"] = True
+        infos[i]["memory_injected_text"] = no_exp if no_exp else ""
+        return
+
+    rep = (replacement or "").strip()
+    if not rep:
+        texts[i] = _splice_out_memory_block(t, injected, None)
+        infos[i]["mem_adaptor_applied"] = True
+        infos[i]["memory_injected_text"] = ""
+        return
+
+    if not injected and "<memory>" not in t.lower():
+        texts[i] = t.rstrip() + f"\n\n<memory>\n{rep}\n</memory>"
+        infos[i]["mem_adaptor_applied"] = True
+        infos[i]["memory_injected_text"] = rep
+        return
+
+    texts[i] = _splice_out_memory_block(t, injected, rep)
     infos[i]["mem_adaptor_applied"] = True
-    infos[i]["memory_injected_text"] = replacement
+    infos[i]["memory_injected_text"] = rep
 
 
 def apply_adaptor_to_obs_texts(

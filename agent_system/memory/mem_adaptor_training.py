@@ -85,15 +85,22 @@ def format_mem_adaptor_training_sample_for_log(
     gi = str(sample.get("grpo_index", ""))
     prompt = _decode_ids(sample.get("prompts"))
     resp = _decode_ids(sample.get("responses"))
-    if len(prompt) > max_prompt_chars:
+    raw_pl, raw_rl = len(prompt), len(resp)
+    p_trunc = raw_pl > max_prompt_chars
+    r_trunc = raw_rl > max_response_chars
+    if p_trunc:
         prompt = prompt[:max_prompt_chars] + "…"
-    if len(resp) > max_response_chars:
+    if r_trunc:
         resp = resp[:max_response_chars] + "…"
+    p_note = f"truncated, cap={max_prompt_chars} chars (full {raw_pl})" if p_trunc else f"full, {raw_pl} chars"
+    r_note = f"truncated, cap={max_response_chars} chars (full {raw_rl})" if r_trunc else f"full, {raw_rl} chars"
     return (
         f"traj_uid={tu} grpo_index={gi}\n"
-        f"--- prompt (truncated to {max_prompt_chars} chars) ---\n{prompt}\n"
-        f"--- response (truncated to {max_response_chars} chars) ---\n{resp}"
-        f"-----------------example end-----------------------"
+        "(prompt/response are tokenizer.decode(skip_special_tokens=True); "
+        "standalone lines like system/user/assistant come from the chat template text.)\n"
+        f"--- prompt ({p_note}) ---\n{prompt}\n"
+        f"--- response ({r_note}) ---\n{resp}\n"
+        "--- end mem_adaptor sample ---"
     )
 
 

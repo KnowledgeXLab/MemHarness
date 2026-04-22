@@ -89,6 +89,21 @@ class OpenAIApiRollout(BaseRollout):
         self._retry_backoff = float(self.oa.get("retry_backoff_sec", 1.0))
         extra = self.oa.get("extra_headers")
         self._extra_headers: Dict[str, str] = dict(OmegaConf.to_container(extra, resolve=True)) if extra else {}
+        body = self.oa.get("extra_body")
+        self._extra_body: Dict[str, Any] = dict(OmegaConf.to_container(body, resolve=True)) if body else {}
+        raw_disable_thinking = self.oa.get("disable_thinking", None)
+        if raw_disable_thinking is not None:
+            try:
+                if bool(raw_disable_thinking):
+                    self._extra_body.setdefault("enable_thinking", False)
+            except Exception:
+                pass
+        else:
+            # Qwen3 / Qwen3.5 compatible gateways often default to reasoning mode.
+            # Unless the user explicitly overrides via extra_body, disable it here.
+            model_norm = self._model.lower().replace("-", "").replace("_", "").replace(".", "")
+            if "qwen3" in model_norm:
+                self._extra_body.setdefault("enable_thinking", False)
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
@@ -181,6 +196,8 @@ class OpenAIApiRollout(BaseRollout):
                 "messages": [{"role": "user", "content": user_text}],
                 "max_tokens": max_tokens,
             }
+            if self._extra_body:
+                payload.update(self._extra_body)
             if temperature > 0:
                 payload["temperature"] = temperature
                 payload["top_p"] = top_p

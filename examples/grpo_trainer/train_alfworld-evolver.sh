@@ -7,13 +7,13 @@
 # 论文框架见 https://arxiv.org/abs/2510.16079
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.99:8265'
+export RAY_ADDRESS='http://10.140.37.91:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="offline"
+export WANDB_MODE="online"
 
 # 仅 global_pool：Reasoning + Ref（GRPO KL）等，无 mem_adaptor 专用池
 trainer_n_gpus_per_node=8
@@ -47,7 +47,7 @@ EMBEDDING_API_KEY="DataFrontier_bge_m3"
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-11"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -61,7 +61,7 @@ FORMAT_REWARD_ENABLE=True
 FORMAT_WEIGHT_OUTCOME=1.0
 FORMAT_WEIGHT_FORMAT=0.1
 # agentic 检索时建议 True，要求响应里出现成对 memory 检索标签（与 env.memory.retrieval_query_* 一致）。
-FORMAT_REQUIRE_MEMORY_RETRIEVE=False
+FORMAT_REQUIRE_MEMORY_RETRIEVE=True
 
 # --- env.memory.experience_utility：EvolveR 式 c_use/c_succ + Laplace 写回 value，可选剪枝 ---
 # prune_every_n_global_steps=0 表示不剪枝；设为正整数则每 N 个 trainer step 剪一次低分记忆。
@@ -86,11 +86,14 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
+mkdir -p "${TRAINER_CHECKPOINT_DIR}"
 LOG_FILE="${EXP_DIR}/train_alfworld_evolver-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
+echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
 train_data_size=16
@@ -137,7 +140,7 @@ fi
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
-RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH']}}))")"
+RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH'], 'WANDB_MODE': os.environ['WANDB_MODE']}}))")"
 
 REMOTE_VDB_CLI=()
 MEMORY_REMOTE_SLURM_LC="$(printf '%s' "${MEMORY_REMOTE_SLURM:-false}" | tr '[:upper:]' '[:lower:]')"
@@ -243,9 +246,10 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.logger=['console','wandb'] \
       trainer.project_name='MemAdaptor_alfworld' \
       trainer.experiment_name="${EXPERIMENT_NAME}" \
+      trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
       trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
       trainer.nnodes=1 \
-      trainer.save_freq=-1 \
+      trainer.save_freq=50 \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
