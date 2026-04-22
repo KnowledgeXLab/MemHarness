@@ -39,25 +39,27 @@ _REWARD_DECOMP_SCALAR_KEYS = (
 
 
 def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
-    """Mean (and min/max) for episode reward decomposition and format sub-scores."""
+    """Mean for all logged reward-decomposition rows; min/max only for outcome/format/combined scalars."""
     out: Dict[str, Any] = {}
     ntb = batch.non_tensor_batch
-    for key in _REWARD_DECOMP_SCALAR_KEYS + tuple(FORMAT_REWARD_EXTRA_KEYS):
+    decomp = _REWARD_DECOMP_SCALAR_KEYS
+    extras = tuple(FORMAT_REWARD_EXTRA_KEYS)
+    for key in decomp + extras:
         if key not in ntb:
             continue
         raw = ntb[key]
         arr = np.asarray(raw, dtype=np.float64).reshape(-1)
         if arr.size == 0:
             continue
-        # wandb-friendly short names
         short = {
             "outcome_reward_scalar": "outcome",
             "format_reward_scalar": "format",
             "combined_reward_scalar": "combined",
         }.get(key, key)
         out[f"reward/{short}/mean"] = float(np.mean(arr))
-        out[f"reward/{short}/min"] = float(np.min(arr))
-        out[f"reward/{short}/max"] = float(np.max(arr))
+        if key in decomp:
+            out[f"reward/{short}/min"] = float(np.min(arr))
+            out[f"reward/{short}/max"] = float(np.max(arr))
     return out
 
 
@@ -134,10 +136,12 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - critic/vf_explained_var: Explained variance of the value function (if use_critic=True)
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
-            - reward/outcome|format|combined|format_*: Decomposition from
-              ``EpisodeRewardManager`` when present in ``non_tensor_batch`` (mean/min/max per step).
-            - episode/memory_retrieval_count/mean|max|min: When ``memory_retrieval_counts`` is present
-              (multi-turn rollout), statistics over **unique trajectories** for total retrievals per episode.
+            - reward/outcome|format|combined: mean + min + max for the three scalar components.
+            - reward/format_* (think/action/memory counts, etc.): **mean only** (no min/max).
+            - episode/memory_retrieval_count/* & memory/retrieval_count_*_per_traj: per-trajectory **env-side**
+              retrieval counts (injection + memory_query steps; see rollout_loop).
+            - memory/retrieve_* , memory/vdb_row_count, etc.: from ``batch.meta_info["memory_rollout_metrics"]``
+              (VDB timing, row count, write-back); logged in the same step as training metrics.
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -241,6 +245,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             metrics["memory/retrieval_count_mean_per_traj"] = mean_m
             metrics["memory/retrieval_count_max_per_traj"] = max_m
             metrics["memory/retrieval_count_min_per_traj"] = min_m
+    _mm = (batch.meta_info or {}).get("memory_rollout_metrics")
+    if isinstance(_mm, dict):
+        for _mk, _mv in _mm.items():
+            if not isinstance(_mk, str) or not _mk.startswith("memory/"):
+                continue
+            try:
+                metrics[_mk] = float(_mv)
+            except (TypeError, ValueError):
+                pass
     return metrics
 
 

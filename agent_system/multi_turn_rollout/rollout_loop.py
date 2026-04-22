@@ -750,7 +750,8 @@ class TrajectoryCollector:
         gen_batch_output.meta_info["rollout_timing_s"] = _rollout_rt
         try:
             gen_batch_output.meta_info["memory_rollout_metrics"] = envs.retrieval_memory.pop_rollout_memory_metrics()
-        except Exception:
+        except Exception as exc:
+            print(f"multi_turn_loop: memory_rollout_metrics failed: {exc}", flush=True)
             gen_batch_output.meta_info["memory_rollout_metrics"] = {}
 
         return gen_batch_output

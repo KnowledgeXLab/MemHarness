@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import traceback
@@ -1421,6 +1422,15 @@ def maybe_summarize_and_write_experiences(
             print(
                 f"memory.timing op=experience_summarize_insert trainer_global_step={step_s} "
                 f"records={len(records)} elapsed_sec={ins_dt:.4f}",
+                flush=True,
+            )
+        k_preview = min(3, len(records))
+        for j, rec in enumerate(random.sample(records, k_preview), start=1):
+            mt = (rec.memory_text or "").replace("\n", " ")
+            preview = mt[:400] + ("…" if len(mt) > 400 else "")
+            print(
+                f"experience_summarizer preview {j}/{k_preview} memory_id={rec.memory_id!r} "
+                f"episode={rec.source_episode_id!r} memory_text={preview!r}",
                 flush=True,
             )
     except Exception:
