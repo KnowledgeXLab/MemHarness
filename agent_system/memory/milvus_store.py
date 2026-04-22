@@ -572,6 +572,20 @@ class MilvusMemoryStore:
         self._create_collection()
         self.logger.info("clear_all_records recreated collection=%s", self.collection_name)
 
+    def count_records(self) -> int:
+        try:
+            client = self._ensure_client()
+            if self.collection_name not in set(client.list_collections()):
+                return 0
+            stats = client.get_collection_stats(collection_name=self.collection_name)
+            if isinstance(stats, dict):
+                for key in ("row_count", "num_entities", "entity_count"):
+                    if key in stats:
+                        return int(stats[key])
+        except Exception as exc:
+            self.logger.warning("count_records failed collection=%s err=%s", self.collection_name, exc)
+        return -1
+
     def close(self) -> None:
         if self._client is None:
             return

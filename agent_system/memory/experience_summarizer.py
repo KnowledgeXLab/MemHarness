@@ -1154,7 +1154,7 @@ def maybe_summarize_and_write_experiences(
     traj_uid: np.ndarray,
     trainer_global_step: int | None = None,
     grpo_group_uid: np.ndarray | None = None,
-) -> int:
+) -> tuple[int, float]:
     """
     Implementation for ``MemoryManager.maybe_write_rollout_memories`` (also usable directly in tests).
 
@@ -1172,11 +1172,11 @@ def maybe_summarize_and_write_experiences(
     ``round(rollout.n * fraction)`` trajectories per group, balancing success/failure when possible.
     """
     if not experience_summarizer_active(config):
-        return 0
+        return 0, 0.0
     rm = memory_manager
     if not rm.enabled or rm.store is None:
         print("experience_summarizer: memory store unavailable; skip.", flush=True)
-        return 0
+        return 0, 0.0
 
     mem = config.env.memory
     es = mem.experience_summarizer
@@ -1298,7 +1298,7 @@ def maybe_summarize_and_write_experiences(
     pending_steps = [c["pending_steps"] for c in candidates]
 
     if not trajectory_user_messages:
-        return 0
+        return 0, 0.0
     if mode not in ("self", "teacher"):
         raise ValueError(f"unsupported mode={mode}")
 
@@ -1313,7 +1313,7 @@ def maybe_summarize_and_write_experiences(
     if mode == "self":
         if actor_rollout_wg is None:
             print("experience_summarizer mode=self but actor_rollout_wg is None; skip.", flush=True)
-            return 0
+            return 0, 0.0
         chat_prompts = [
             _build_chat_prompt(
                 tokenizer, system_prompt, user_msg, apply_kw if isinstance(apply_kw, dict) else None
@@ -1382,7 +1382,7 @@ def maybe_summarize_and_write_experiences(
     except Exception:
         print("experience_summarizer failed during model calls; no records written.", flush=True)
         traceback.print_exc()
-        return 0
+        return 0, 0.0
 
     t_infer_elapsed = time.perf_counter() - t_infer_0
     if want_timing:
@@ -1411,7 +1411,7 @@ def maybe_summarize_and_write_experiences(
         records.extend(recs)
 
     if not records:
-        return 0
+        return 0, 0.0
     try:
         t_ins_0 = time.perf_counter()
         rm.store.add_records(records)
@@ -1426,5 +1426,5 @@ def maybe_summarize_and_write_experiences(
     except Exception:
         print("experience_summarizer failed to add_records.", flush=True)
         traceback.print_exc()
-        return 0
-    return len(records)
+        return 0, 0.0
+    return len(records), float(ins_dt)

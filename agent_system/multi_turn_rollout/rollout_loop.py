@@ -748,5 +748,9 @@ class TrajectoryCollector:
         _rollout_rt = dict(getattr(self, "_rollout_timing_breakdown", {}) or {})
         gen_batch_output.meta_info = dict(gen_batch_output.meta_info or {})
         gen_batch_output.meta_info["rollout_timing_s"] = _rollout_rt
+        try:
+            gen_batch_output.meta_info["memory_rollout_metrics"] = envs.retrieval_memory.pop_rollout_memory_metrics()
+        except Exception:
+            gen_batch_output.meta_info["memory_rollout_metrics"] = {}
 
         return gen_batch_output

@@ -1512,6 +1512,14 @@ class RayPPOTrainer:
                         for _rk, _rv in _rollout_rt.items():
                             metrics[f"timing_s/rollout_{_rk}"] = float(_rv)
 
+                    _mem_rm = (batch.meta_info or {}).get("memory_rollout_metrics")
+                    if isinstance(_mem_rm, dict):
+                        for _mk, _mv in _mem_rm.items():
+                            try:
+                                metrics[_mk] = float(_mv)
+                            except (TypeError, ValueError):
+                                pass
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
                         step_rewards_tensor = core_gigpo.compute_step_discounted_returns(
                             batch=batch,

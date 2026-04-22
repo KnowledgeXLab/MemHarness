@@ -47,8 +47,16 @@ class MemoryManager:
         self.store = None
         self._timing_retrieve_sec: float = 0.0
         self._timing_retrieve_calls: int = 0
+        self._timing_retrieve_hits_sum: int = 0
         self._timing_retrieval_utility_sec: float = 0.0
         self._timing_retrieval_utility_calls: int = 0
+        self._rollup_retrieve_sec: float = 0.0
+        self._rollup_retrieve_calls: int = 0
+        self._rollup_retrieve_hits_sum: int = 0
+        self._rollup_records_inserted: int = 0
+        self._rollup_batch_insert_sec: float = 0.0
+        self._rollup_prune_deleted: int = 0
+        self._rollup_prune_sec: float = 0.0
 
         if not self.enabled:
             return
@@ -147,35 +155,87 @@ class MemoryManager:
         msg = str(raw).strip() if raw is not None else ""
         return msg if msg else _DEFAULT_EMPTY_RETRIEVAL_MESSAGE
 
-    def _flush_retrieval_rollup_timings(self, trainer_global_step: int | None) -> None:
-        """Emit one line per rollout batch for retrieve / retrieval-utility latency (if enabled)."""
-        if not self._log_operation_timing():
+    def _merge_retrieve_window_into_rollup(self) -> None:
+        if not self.enabled:
+            return
+        if self._timing_retrieve_calls <= 0:
             self._timing_retrieve_sec = 0.0
             self._timing_retrieve_calls = 0
-            self._timing_retrieval_utility_sec = 0.0
-            self._timing_retrieval_utility_calls = 0
+            self._timing_retrieve_hits_sum = 0
             return
-        step_s = "" if trainer_global_step is None else str(int(trainer_global_step))
-        if self._timing_retrieve_calls:
-            mean = self._timing_retrieve_sec / max(1, self._timing_retrieve_calls)
-            print(
-                f"memory.timing op=retrieve_aggregate trainer_global_step={step_s} "
-                f"calls={self._timing_retrieve_calls} total_sec={self._timing_retrieve_sec:.4f} "
-                f"mean_sec={mean:.4f}",
-                flush=True,
-            )
-        if self._timing_retrieval_utility_calls:
-            mean_u = self._timing_retrieval_utility_sec / max(1, self._timing_retrieval_utility_calls)
-            print(
-                f"memory.timing op=retrieval_utility_update_aggregate trainer_global_step={step_s} "
-                f"calls={self._timing_retrieval_utility_calls} "
-                f"total_sec={self._timing_retrieval_utility_sec:.4f} mean_sec={mean_u:.4f}",
-                flush=True,
-            )
+        self._rollup_retrieve_sec += self._timing_retrieve_sec
+        self._rollup_retrieve_calls += self._timing_retrieve_calls
+        self._rollup_retrieve_hits_sum += self._timing_retrieve_hits_sum
         self._timing_retrieve_sec = 0.0
         self._timing_retrieve_calls = 0
+        self._timing_retrieve_hits_sum = 0
+
+    def _flush_retrieval_rollup_timings(self, trainer_global_step: int | None) -> None:
+        """Log retrieve / retrieval-utility latency for this rollout window, then merge retrieve stats for W&B."""
+        if not self.enabled:
+            return
+        step_s = "" if trainer_global_step is None else str(int(trainer_global_step))
+        if self._log_operation_timing():
+            if self._timing_retrieve_calls:
+                mean = self._timing_retrieve_sec / max(1, self._timing_retrieve_calls)
+                print(
+                    f"memory.timing op=retrieve_aggregate trainer_global_step={step_s} "
+                    f"calls={self._timing_retrieve_calls} total_sec={self._timing_retrieve_sec:.4f} "
+                    f"mean_sec={mean:.4f}",
+                    flush=True,
+                )
+            if self._timing_retrieval_utility_calls:
+                mean_u = self._timing_retrieval_utility_sec / max(1, self._timing_retrieval_utility_calls)
+                print(
+                    f"memory.timing op=retrieval_utility_update_aggregate trainer_global_step={step_s} "
+                    f"calls={self._timing_retrieval_utility_calls} "
+                    f"total_sec={self._timing_retrieval_utility_sec:.4f} mean_sec={mean_u:.4f}",
+                    flush=True,
+                )
+        self._merge_retrieve_window_into_rollup()
         self._timing_retrieval_utility_sec = 0.0
         self._timing_retrieval_utility_calls = 0
+
+    def pop_rollout_memory_metrics(self) -> dict[str, float]:
+        """Finalize metrics for the last trainer step (including any retrieve window not yet flushed)."""
+        if not self.enabled:
+            return {}
+        self._merge_retrieve_window_into_rollup()
+        rc = self._rollup_retrieve_calls
+        rs = self._rollup_retrieve_sec
+        rh = self._rollup_retrieve_hits_sum
+        out: dict[str, float] = {}
+        if rc > 0:
+            out["memory/retrieve_calls"] = float(rc)
+            out["memory/retrieve_total_sec"] = float(rs)
+            out["memory/retrieve_mean_sec"] = float(rs / rc)
+            out["memory/retrieve_avg_hits"] = float(rh / rc)
+        else:
+            out["memory/retrieve_calls"] = 0.0
+            out["memory/retrieve_total_sec"] = 0.0
+            out["memory/retrieve_mean_sec"] = 0.0
+            out["memory/retrieve_avg_hits"] = 0.0
+        out["memory/records_inserted"] = float(self._rollup_records_inserted)
+        out["memory/batch_insert_sec"] = float(self._rollup_batch_insert_sec)
+        out["memory/prune_deleted"] = float(self._rollup_prune_deleted)
+        out["memory/prune_sec"] = float(self._rollup_prune_sec)
+        nrow = -1.0
+        if self.store is not None:
+            try:
+                c = int(self.store.count_records())
+                if c >= 0:
+                    nrow = float(c)
+            except Exception:
+                pass
+        out["memory/vdb_row_count"] = nrow
+        self._rollup_retrieve_sec = 0.0
+        self._rollup_retrieve_calls = 0
+        self._rollup_retrieve_hits_sum = 0
+        self._rollup_records_inserted = 0
+        self._rollup_batch_insert_sec = 0.0
+        self._rollup_prune_deleted = 0
+        self._rollup_prune_sec = 0.0
+        return out
 
     def _apply_retrieval_utility_updates(self, retrieved: list[RetrievedMemory]) -> None:
         if not self.experience_utility_enabled() or self.store is None:
@@ -280,6 +340,8 @@ class MemoryManager:
             t0 = time.perf_counter()
             deleted = self.store.prune_low_utility_memories(threshold, min_uses)
             dt = time.perf_counter() - t0
+            self._rollup_prune_deleted += int(deleted)
+            self._rollup_prune_sec += float(dt)
             self._last_utility_prune_step = step
             print(
                 f"experience_utility: pruned {deleted} memories (threshold={threshold} min_uses={min_uses}) "
@@ -337,9 +399,9 @@ class MemoryManager:
 
         t0 = time.perf_counter()
         retrieved = self.store.retrieve(query_text=query_text)
-        if self._log_operation_timing():
-            self._timing_retrieve_sec += time.perf_counter() - t0
-            self._timing_retrieve_calls += 1
+        self._timing_retrieve_sec += time.perf_counter() - t0
+        self._timing_retrieve_calls += 1
+        self._timing_retrieve_hits_sum += len(retrieved)
 
         norm_state = normalize_text(state_text, max_chars=self.config.max_state_chars)
         if not retrieved:
@@ -381,6 +443,9 @@ class MemoryManager:
         """
         from agent_system.memory.experience_summarizer import maybe_summarize_and_write_experiences
 
+        if not self.enabled:
+            return []
+
         config = kwargs.get("config")
         tokenizer = kwargs.get("tokenizer")
         total_batch_list = kwargs.get("total_batch_list")
@@ -398,7 +463,7 @@ class MemoryManager:
 
         self._flush_retrieval_rollup_timings(trainer_global_step)
 
-        maybe_summarize_and_write_experiences(
+        n_ins, ins_sec = maybe_summarize_and_write_experiences(
             config=config,
             memory_manager=self,
             tokenizer=tokenizer,
@@ -412,6 +477,8 @@ class MemoryManager:
             trainer_global_step=trainer_global_step,
             grpo_group_uid=kwargs.get("grpo_group_uid"),
         )
+        self._rollup_records_inserted += int(n_ins)
+        self._rollup_batch_insert_sec += float(ins_sec)
 
         self._apply_episode_utility_updates(
             total_infos=total_infos,

@@ -232,9 +232,15 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         mrc = np.asarray(batch.non_tensor_batch["memory_retrieval_counts"], dtype=np.float64).reshape(-1)
         um = mrc[unique_idx]
         if um.size > 0:
-            metrics["episode/memory_retrieval_count/mean"] = float(np.mean(um))
-            metrics["episode/memory_retrieval_count/max"] = float(np.max(um))
-            metrics["episode/memory_retrieval_count/min"] = float(np.min(um))
+            mean_m = float(np.mean(um))
+            max_m = float(np.max(um))
+            min_m = float(np.min(um))
+            metrics["episode/memory_retrieval_count/mean"] = mean_m
+            metrics["episode/memory_retrieval_count/max"] = max_m
+            metrics["episode/memory_retrieval_count/min"] = min_m
+            metrics["memory/retrieval_count_mean_per_traj"] = mean_m
+            metrics["memory/retrieval_count_max_per_traj"] = max_m
+            metrics["memory/retrieval_count_min_per_traj"] = min_m
     return metrics
 
 

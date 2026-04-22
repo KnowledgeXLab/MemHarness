@@ -33,6 +33,10 @@ class BaseMemoryStore:
     def clear_all_records(self) -> None:
         return
 
+    def count_records(self) -> int:
+        """Row count in the vector collection, or -1 if unsupported / unknown."""
+        return -1
+
     def close(self) -> None:
         raise NotImplementedError
 
@@ -149,6 +153,17 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         response = requests.post(f"{self.base_url}/memories/clear", json={}, timeout=self.timeout)
         response.raise_for_status()
 
+    def count_records(self) -> int:
+        try:
+            response = requests.get(f"{self.base_url}/memories/count", timeout=self.timeout)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict) and "count" in payload:
+                return int(payload["count"])
+        except Exception:
+            pass
+        return -1
+
     def close(self) -> None:
         return
 
@@ -234,6 +249,9 @@ class MemoryStoreDispatcher(BaseMemoryStore):
 
     def clear_all_records(self) -> None:
         return self.backend.clear_all_records()
+
+    def count_records(self) -> int:
+        return self.backend.count_records()
 
     def close(self) -> None:
         self.backend.close()

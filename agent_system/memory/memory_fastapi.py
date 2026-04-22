@@ -29,6 +29,15 @@ def create_memory_fastapi_app(
             "store_dir": store.store_dir,
         }
 
+    @app.get("/memories/count")
+    async def memories_count() -> dict[str, Any]:
+        try:
+            with lock:
+                n = store.count_records()
+            return {"count": int(n)}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @app.post("/memories/batch")
     async def memories_batch(body: dict) -> dict[str, Any]:
         items = body.get("items", [])

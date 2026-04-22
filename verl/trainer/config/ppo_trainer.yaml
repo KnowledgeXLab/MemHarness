@@ -386,11 +386,11 @@ env:
       # full: JSON with state_text, action_text, memory_text, optional metadata (strong models / GPT-style offline extract).
       # compact: model outputs only memory_text (+ optional source_step); state/action filled from trajectory (weak self-distill).
       schema: full
-      num_memories_per_trajectory: 2 # how many memories to extract from each trajectory
+      num_memories_per_trajectory: 1 # how many memories to extract from each trajectory
       summarization_batch_size: 0 # max trajectories per LLM batch (0 = submit all pending trajectories in one call).
       # After filtering (e.g. only_store_positive_reward), keep at most round(rollout.n * fraction) trajectories per GRPO group
       # for write-back summarization; prefer balanced success/failure, then fill from the larger pool (random). 1.0 = keep all.
-      grpo_summarize_keep_fraction: 0.5
+      grpo_summarize_keep_fraction: 0.25
       parse_max_attempts: 3 # max model calls when JSON parse yields no memories or all items fail validation (state/action/memory_text).
       extractor_model_label: online_rollout # optional label stored in record metadata (teacher defaults to openai_api.model).
       system_prompt: "" # empty -> built-in JSON extraction system prompt
