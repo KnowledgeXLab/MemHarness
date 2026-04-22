@@ -5,6 +5,9 @@
 # - Search bench: ``<think>``, exclusive ``<search>`` xor ``<answer>`` (see ``search_projection``).
 # Segment caps (see ``max_*_segments`` in config): AlfWorld projection uses the first ``<action>`` pair only;
 # ``MemoryManager.extract_query`` uses the first retrieval block only — rewards should not treat duplicates as valid.
+# Multi-turn: ``EpisodeRewardManager`` uses :func:`compute_generic_action_think_memory_format_reward_multi_step`:
+# think/action bounds apply **per step**; memory-retrieve count is **summed over the trajectory** vs
+# ``max_memory_retrieve_segments``.
 
 from __future__ import annotations
 
@@ -161,6 +164,134 @@ def compute_generic_action_think_memory_format_reward(
     metrics["format_action_ok"] = int(action_ok)
     metrics["format_memory_ok"] = int(mem_ok)
     return GenericFormatRewardOutput(reward=float(score), metrics=metrics)
+
+
+def compute_generic_action_think_memory_format_reward_multi_step(
+    step_responses: list[str],
+    *,
+    min_segment_chars: int,
+    require_memory_retrieve: bool,
+    memory_open_tag: str,
+    memory_close_tag: str,
+    think_open_tag: str,
+    think_close_tag: str,
+    action_open_tag: str,
+    action_close_tag: str,
+    weight_think: float,
+    weight_action: float,
+    weight_memory: float,
+    penalize_chinese_chars: bool,
+    max_think_segments: int = 0,
+    max_action_segments: int = 1,
+    max_memory_retrieve_segments: int = 1,
+) -> GenericFormatRewardOutput:
+    """Format reward over a full trajectory (multi-turn rollout rows share ``traj_uid``).
+
+    - **think / action**: each non-empty step must satisfy the same per-step bounds as
+      :func:`compute_generic_action_think_memory_format_reward`.
+    - **memory retrieve**: valid segments are **summed across all steps** and compared to
+      ``max_memory_retrieve_segments`` (trajectory-wide cap).
+    """
+    texts = [s or "" for s in step_responses]
+    metrics = _zero_metrics()
+    if not texts:
+        return GenericFormatRewardOutput(reward=0.0, metrics=metrics)
+
+    if penalize_chinese_chars:
+        for t in texts:
+            if _has_chinese(t):
+                metrics["format_has_chinese"] = 1
+                metrics["format_penalized_chinese"] = 1
+                return GenericFormatRewardOutput(reward=0.0, metrics=metrics)
+
+    think_ok_all = True
+    action_ok_all = True
+    think_over_any = False
+    action_over_any = False
+    sum_think = 0
+    sum_action = 0
+    sum_mem = 0
+
+    for t in texts:
+        if not t.strip():
+            think_ok_all = False
+            action_ok_all = False
+            continue
+        think_n = _valid_segments(t, think_open_tag, think_close_tag, min_segment_chars)
+        action_n = _valid_segments(t, action_open_tag, action_close_tag, min_segment_chars)
+        mem_n = _valid_segments(t, memory_open_tag, memory_close_tag, min_segment_chars)
+        sum_think += think_n
+        sum_action += action_n
+        sum_mem += mem_n
+
+        to, tover = _bounded_count_ok(think_n, at_least=1, at_most=max_think_segments)
+        ao, aover = _bounded_count_ok(action_n, at_least=1, at_most=max_action_segments)
+        if to == 0.0:
+            think_ok_all = False
+        if ao == 0.0:
+            action_ok_all = False
+        if tover:
+            think_over_any = True
+        if aover:
+            action_over_any = True
+
+    metrics["format_think_count"] = sum_think
+    metrics["format_action_count"] = sum_action
+    metrics["format_memory_retrieve_count"] = sum_mem
+
+    think_ok_f = 1.0 if think_ok_all else 0.0
+    action_ok_f = 1.0 if action_ok_all else 0.0
+
+    if require_memory_retrieve:
+        mem_ok, mem_over = _bounded_count_ok(
+            sum_mem, at_least=1, at_most=max_memory_retrieve_segments
+        )
+        w_mem = weight_memory
+    else:
+        mem_ok, mem_over = _optional_memory_ok(sum_mem, max_segments=max_memory_retrieve_segments)
+        w_mem = 0.0
+
+    metrics["format_think_over_limit"] = int(think_over_any)
+    metrics["format_action_over_limit"] = int(action_over_any)
+    metrics["format_memory_over_limit"] = int(mem_over)
+
+    optional_memory_overflow = (
+        not require_memory_retrieve
+        and w_mem <= 0.0
+        and max_memory_retrieve_segments > 0
+        and mem_over
+    )
+    metrics["format_protocol_hard_zero"] = int(optional_memory_overflow)
+
+    if optional_memory_overflow:
+        metrics["format_think_ok"] = int(think_ok_f)
+        metrics["format_action_ok"] = int(action_ok_f)
+        metrics["format_memory_ok"] = int(mem_ok)
+        return GenericFormatRewardOutput(reward=0.0, metrics=metrics)
+
+    denom = weight_think + weight_action + w_mem
+    score = (weight_think * think_ok_f + weight_action * action_ok_f + w_mem * mem_ok) / denom
+    metrics["format_think_ok"] = int(think_ok_f)
+    metrics["format_action_ok"] = int(action_ok_f)
+    metrics["format_memory_ok"] = int(mem_ok)
+    return GenericFormatRewardOutput(reward=float(score), metrics=metrics)
+
+
+def compute_search_think_memory_format_reward_multi_step(
+    step_responses: list[str],
+    **kwargs,
+) -> GenericFormatRewardOutput:
+    """Search-bench format reward: conservative **min** over per-step scores (protocol is step-local)."""
+    outs: list[GenericFormatRewardOutput] = []
+    for t in step_responses:
+        if not (t or "").strip():
+            outs.append(GenericFormatRewardOutput(reward=0.0, metrics=_zero_metrics()))
+            continue
+        outs.append(compute_search_think_memory_format_reward(t, **kwargs))
+    if not outs:
+        return GenericFormatRewardOutput(reward=0.0, metrics=_zero_metrics())
+    worst = min(outs, key=lambda o: o.reward)
+    return worst
 
 
 def compute_search_think_memory_format_reward(
@@ -390,7 +521,28 @@ def _run_self_tests() -> None:
     assert use_search_format_reward("my_search_task", ["search"]) is True
     assert use_search_format_reward("alfworld", ["search"]) is False
 
-    print("format_reward self-tests: OK (12 checks)")
+    # 11) 轨迹：两步各 1 次检索，max_memory_retrieve_segments=1（可选记忆）→ 总次数 2 硬清零
+    m11 = compute_generic_action_think_memory_format_reward_multi_step(
+        [
+            "<think>abc</think><action>run</action><memory_retrieve>que1</memory_retrieve>",
+            "<think>def</think><action>go</action><memory_retrieve>que2</memory_retrieve>",
+        ],
+        **T,
+    )
+    assert m11.reward == 0.0 and m11.metrics["format_protocol_hard_zero"] == 1
+    assert m11.metrics["format_memory_retrieve_count"] == 2, m11
+
+    # 12) 轨迹：两步共 1 次检索，上限 1 → 满分
+    m12 = compute_generic_action_think_memory_format_reward_multi_step(
+        [
+            "<think>abc</think><action>run</action>",
+            "<think>def</think><action>goto</action><memory_retrieve>que1</memory_retrieve>",
+        ],
+        **T,
+    )
+    assert abs(m12.reward - 1.0) < 1e-9 and m12.metrics["format_memory_retrieve_count"] == 1, m12
+
+    print("format_reward self-tests: OK (14 checks)")
 
 
 if __name__ == "__main__":

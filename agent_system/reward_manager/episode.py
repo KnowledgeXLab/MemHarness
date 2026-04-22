@@ -24,8 +24,8 @@ from verl import DataProto
 
 from agent_system.reward_manager.format_reward import (
     FORMAT_REWARD_EXTRA_KEYS,
-    compute_generic_action_think_memory_format_reward,
-    compute_search_think_memory_format_reward,
+    compute_generic_action_think_memory_format_reward_multi_step,
+    compute_search_think_memory_format_reward_multi_step,
     empty_format_reward_metrics,
     use_search_format_reward,
 )
@@ -67,14 +67,15 @@ class EpisodeRewardManager:
             OmegaConf.to_container(fr.search_data_source_substrings, resolve=True)
         )
 
+        row_infos: list[dict] = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
-            prompt_ids = data_item.batch['prompts']
+            prompt_ids = data_item.batch["prompts"]
 
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
@@ -99,10 +100,33 @@ class EpisodeRewardManager:
                 raw_outcome = episode_rewards
             outcome = float(np.asarray(raw_outcome, dtype=np.float64).reshape(-1)[0])
 
-            fmt_metrics = empty_format_reward_metrics()
-            format_score = 0.0
-            applied_format = False
+            tu = data_item.non_tensor_batch.get("traj_uid")
+            traj_uid_s = str(tu) if tu is not None else str(i)
 
+            row_infos.append(
+                {
+                    "i": i,
+                    "traj_uid": traj_uid_s,
+                    "prompt_str": prompt_str,
+                    "response_str": response_str,
+                    "data_source": data_source,
+                    "outcome": outcome,
+                    "valid_response_length": int(valid_response_length),
+                    "prompt_ids": prompt_ids,
+                }
+            )
+
+        by_traj: dict[str, list[dict]] = defaultdict(list)
+        for r in row_infos:
+            by_traj[r["traj_uid"]].append(r)
+        for rows in by_traj.values():
+            rows.sort(key=lambda x: x["i"])
+
+        traj_format: dict[str, tuple[float, dict[str, float]]] = {}
+        for tu, rows in by_traj.items():
+            format_score = 0.0
+            fmt_metrics = empty_format_reward_metrics()
+            applied_format = False
             if fr_enabled and w_format != 0.0:
                 applied_format = True
                 min_seg = int(fr.min_segment_chars)
@@ -114,9 +138,11 @@ class EpisodeRewardManager:
                 max_think = int(fr.max_think_segments)
                 max_action = int(fr.max_action_segments)
                 max_mem_seg = int(fr.max_memory_retrieve_segments)
+                data_source = rows[0]["data_source"]
+                step_texts = [str(x["response_str"]) for x in rows]
                 if use_search_format_reward(str(data_source), search_markers):
-                    out = compute_search_think_memory_format_reward(
-                        response_str,
+                    out = compute_search_think_memory_format_reward_multi_step(
+                        step_texts,
                         min_segment_chars=min_seg,
                         require_memory_retrieve=req_mem,
                         memory_open_tag=str(fr.memory_open_tag),
@@ -135,8 +161,8 @@ class EpisodeRewardManager:
                         max_memory_retrieve_segments=max_mem_seg,
                     )
                 else:
-                    out = compute_generic_action_think_memory_format_reward(
-                        response_str,
+                    out = compute_generic_action_think_memory_format_reward_multi_step(
+                        step_texts,
                         min_segment_chars=min_seg,
                         require_memory_retrieve=req_mem,
                         memory_open_tag=str(fr.memory_open_tag),
@@ -155,6 +181,19 @@ class EpisodeRewardManager:
                     )
                 format_score = float(out.reward)
                 fmt_metrics = out.metrics
+            traj_format[tu] = (format_score if applied_format else 0.0, fmt_metrics, applied_format)
+
+        for r in row_infos:
+            i = r["i"]
+            tu = r["traj_uid"]
+            prompt_str = r["prompt_str"]
+            response_str = r["response_str"]
+            data_source = r["data_source"]
+            outcome = r["outcome"]
+            valid_response_length = r["valid_response_length"]
+            prompt_ids = r["prompt_ids"]
+
+            format_score, fmt_metrics, applied_format = traj_format[tu]
 
             if fr_enabled and applied_format:
                 final_score = w_outcome * outcome + w_format * format_score

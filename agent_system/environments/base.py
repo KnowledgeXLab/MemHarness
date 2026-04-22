@@ -217,7 +217,11 @@ class EnvironmentManagerBase:
     def _append_external_memory(prompt: str, memory_prompt: str) -> str:
         if not memory_prompt:
             return prompt
-        return f"{prompt}\n\n{memory_prompt}"
+        block = memory_prompt.strip()
+        if not block:
+            return prompt
+        wrapped = f"<memory>\n{block}\n</memory>"
+        return f"{prompt}\n\n{wrapped}"
 
     def success_evaluator(self, *args, **kwargs) -> Dict[str, np.ndarray]:
         """

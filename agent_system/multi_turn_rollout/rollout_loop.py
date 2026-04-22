@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from collections import defaultdict
+
 import torch
 import numpy as np
 from verl import DataProto
@@ -375,8 +378,16 @@ class TrajectoryCollector:
         memory_retrieval_counts = np.zeros(batch_size, dtype=np.float32)
         count_query_as_step = bool(self.config.env.memory.count_query_as_step)
         max_env_steps = max(1, int(self.config.env.max_steps))
-        max_rollout_rounds = max_env_steps * 4
+        max_rollout_rounds = max_env_steps
         rollout_rounds = 0
+        timing = {
+            "preprocess": 0.0,
+            "generate_sequences": 0.0,
+            "env_step_with_memory": 0.0,
+            "loop_other": 0.0,
+            "success_evaluator": 0.0,
+            "maybe_write_rollout_memories": 0.0,
+        }
         # Trajectory collection loop
         while True:
             rollout_rounds += 1
@@ -392,6 +403,7 @@ class TrajectoryCollector:
             if not active_masks.any():
                 break
 
+            t_iter = time.perf_counter()
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -411,6 +423,9 @@ class TrajectoryCollector:
 
             # pad to be divisible by dp_size
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
+            t_after_preprocess = time.perf_counter()
+            timing["preprocess"] += t_after_preprocess - t_iter
+
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
             # # unpad
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
@@ -424,12 +439,16 @@ class TrajectoryCollector:
                 text_actions = list(batch.non_tensor_batch["api_response_text"])
             else:
                 text_actions = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-            
+            t_after_gen = time.perf_counter()
+            timing["generate_sequences"] += t_after_gen - t_after_preprocess
+
             next_obs, rewards, dones, infos, env_step_mask = envs.step_with_memory(
                 text_actions,
                 current_obs=obs,
                 current_infos=infos,
             )
+            t_after_env = time.perf_counter()
+            timing["env_step_with_memory"] += t_after_env - t_after_gen
 
             for i in range(batch_size):
                 if episode_gamefiles[i] is None and i < len(infos) and infos[i] is not None:
@@ -536,15 +555,22 @@ class TrajectoryCollector:
             current_infos = infos
 
             # Break if all environments are done
+            t_iter_end = time.perf_counter()
+            timing["loop_other"] += t_iter_end - t_after_env
+
             if is_done.all():
                 break
         
+        t_post_loop = time.perf_counter()
         success: Dict[str, np.ndarray] = envs.success_evaluator(
                     total_infos=total_infos,
                     total_batch_list=total_batch_list,
                     episode_rewards=episode_rewards, 
                     episode_lengths=episode_lengths,
                     )
+        t_after_success = time.perf_counter()
+        timing["success_evaluator"] += t_after_success - t_post_loop
+
         envs.maybe_write_rollout_memories(
             config=self.config,
             tokenizer=self.tokenizer,
@@ -558,6 +584,9 @@ class TrajectoryCollector:
             trainer_global_step=trainer_global_step,
             grpo_group_uid=uid_batch,
         )
+        timing["maybe_write_rollout_memories"] += time.perf_counter() - t_after_success
+
+        self._rollout_timing_breakdown = timing
 
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles
     
@@ -596,6 +625,7 @@ class TrajectoryCollector:
         total_episode_gamefiles = []
         try_count: int = 0
         max_try_count = self.config.algorithm.filter_groups.max_num_gen_batches
+        timing_acc = defaultdict(float)
 
         while len(total_batch_list) < self.config.data.train_batch_size * self.config.env.rollout.n and try_count < max_try_count:
 
@@ -611,6 +641,8 @@ class TrajectoryCollector:
                 adaptor_rollout_wg=adaptor_rollout_wg,
                 trainer_global_step=trainer_global_step,
             )
+            for _k, _v in getattr(self, "_rollout_timing_breakdown", {}).items():
+                timing_acc[_k] += float(_v)
             batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, memory_retrieval_counts, episode_gamefiles = filter_group_data(batch_list=batch_list, 
                                                                                                 episode_rewards=episode_rewards, 
                                                                                                 episode_lengths=episode_lengths, 
@@ -643,6 +675,8 @@ class TrajectoryCollector:
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
         total_memory_retrieval_counts = np.concatenate(total_memory_retrieval_counts, axis=0)
         total_episode_gamefiles = np.concatenate(total_episode_gamefiles, axis=0)
+
+        self._rollout_timing_breakdown = dict(timing_acc)
 
         return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, total_memory_retrieval_counts, total_episode_gamefiles
 
@@ -711,5 +745,8 @@ class TrajectoryCollector:
             memory_retrieval_counts=total_memory_retrieval_counts,
             episode_gamefiles=total_episode_gamefiles,
         )
-        
+        _rollout_rt = dict(getattr(self, "_rollout_timing_breakdown", {}) or {})
+        gen_batch_output.meta_info = dict(gen_batch_output.meta_info or {})
+        gen_batch_output.meta_info["rollout_timing_s"] = _rollout_rt
+
         return gen_batch_output

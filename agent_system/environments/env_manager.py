@@ -337,6 +337,21 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         infos: List[Dict[str, Any]] = []
         env_step_mask = np.zeros(len(text_actions), dtype=bool)
 
+        # Parallel env steps: submit all worker.step.remote first, one ray.get (same pattern as
+        # AlfworldEnvs.step). Avoids O(batch) serial latency when some slots are memory_query.
+        step_indices = [idx for idx, q in enumerate(query_texts) if not q]
+        step_results: Dict[int, Tuple[Any, Any, Any, Dict[str, Any]]] = {}
+        if step_indices:
+            futures = [
+                self.envs.workers[idx].step.remote(actions[idx]) for idx in step_indices
+            ]
+            raw = ray.get(futures)
+            for j, idx in enumerate(step_indices):
+                obs, scores, done_ls, info = raw[j]
+                for key in info.keys():
+                    info[key] = info[key][0]
+                step_results[idx] = (obs, scores, done_ls, info)
+
         for idx, query_text in enumerate(query_texts):
             if query_text:
                 infos.append(
@@ -351,9 +366,7 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                 )
                 continue
 
-            obs, scores, done_ls, info = ray.get(self.envs.workers[idx].step.remote(actions[idx]))
-            for key in info.keys():
-                info[key] = info[key][0]
+            obs, scores, done_ls, info = step_results[idx]
             next_text_obs[idx] = obs[0]
             self.memory[idx].append({"text_obs": self.pre_text_obs[idx], "action": actions[idx]})
             self.pre_text_obs[idx] = obs[0]
@@ -366,6 +379,9 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
             info["memory_injected_text"] = ""
             info["memory_event"] = None
             infos.append(info)
+            # Keep admissible_commands cache in sync with AlfworldEnvs.step (used by get_admissible_commands).
+            if "admissible_commands" in info:
+                self.envs.prev_admissible_commands[idx] = info["admissible_commands"]
 
         infos = set_gamefile(infos, self.gamefile)
         image_obs = self.envs.getobs() if self.envs.multi_modal else None

@@ -35,7 +35,7 @@ num_cpus_per_env_worker=0.1
 TASK_NAME="alfworld"
 
 MEMORY_ENABLED=True
-MEMORY_WRITE_BACK=True
+MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
@@ -52,12 +52,12 @@ MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
 
-# MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
-MEMORY_REBUILD_SOURCE_PATH=""
+MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
+# MEMORY_REBUILD_SOURCE_PATH=""
 
 # --- reward_model.format_reward：与 projection 对齐的 think / action / memory_retrieve shaping ---
 # 见 verl/trainer/config/ppo_trainer.yaml ``reward_model.format_reward``；此处用 Hydra 覆盖。
-FORMAT_REWARD_ENABLE=False
+FORMAT_REWARD_ENABLE=True
 FORMAT_WEIGHT_OUTCOME=1.0
 FORMAT_WEIGHT_FORMAT=0.1
 # agentic 检索时建议 True，要求响应里出现成对 memory 检索标签（与 env.memory.retrieval_query_* 一致）。
@@ -72,7 +72,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-3"
+EXPERIMENT_NAME="train_evolver-6"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
@@ -101,7 +101,7 @@ group_size=8
 # （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
 DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
 DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
-SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-2048}"
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
 if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
   ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
@@ -196,8 +196,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.trainable=true \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.model.use_remove_padding=True \
-      actor_rollout_ref.actor.ppo_mini_batch_size=128 \
-      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
+      actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.actor.use_kl_loss=True \
       actor_rollout_ref.actor.kl_loss_coef=0.01 \
       actor_rollout_ref.actor.kl_loss_type=low_var_kl \

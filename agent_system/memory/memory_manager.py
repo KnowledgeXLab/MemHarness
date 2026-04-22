@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import re
 import time
@@ -18,7 +17,6 @@ from .global_step_schedule import match_phase_for_global_step
 from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
 
-logger = logging.getLogger(__name__)
 
 # Aligns with ``mem_adaptor.no_experience_message`` default in ``verl/trainer/config/ppo_trainer.yaml``.
 _DEFAULT_EMPTY_RETRIEVAL_MESSAGE = (
@@ -94,11 +92,12 @@ class MemoryManager:
         retrieval_mode = str(memory_config.retrieval_mode).strip().lower()
         retrieve_key = str(memory_config.retrieve_key).strip().lower()
         if retrieval_mode == "fixed" and retrieve_key in ("memory_text", "memory"):
-            logger.warning(
+            print(
                 "Memory VDB: retrieval_mode=fixed uses current observation text as the query embedding, "
                 "but retrieve_key=%r means vectors are built from that field (not state_text). "
                 "If you want to use the same field for both query and index, set retrieve_key to state_text and rebuild the VDB.",
                 retrieve_key,
+                flush=True,
             )
 
     def refresh(self) -> None:
@@ -159,22 +158,19 @@ class MemoryManager:
         step_s = "" if trainer_global_step is None else str(int(trainer_global_step))
         if self._timing_retrieve_calls:
             mean = self._timing_retrieve_sec / max(1, self._timing_retrieve_calls)
-            logger.info(
-                "memory.timing op=retrieve_aggregate trainer_global_step=%s calls=%s total_sec=%.4f mean_sec=%.4f",
-                step_s,
-                self._timing_retrieve_calls,
-                self._timing_retrieve_sec,
-                mean,
+            print(
+                f"memory.timing op=retrieve_aggregate trainer_global_step={step_s} "
+                f"calls={self._timing_retrieve_calls} total_sec={self._timing_retrieve_sec:.4f} "
+                f"mean_sec={mean:.4f}",
+                flush=True,
             )
         if self._timing_retrieval_utility_calls:
             mean_u = self._timing_retrieval_utility_sec / max(1, self._timing_retrieval_utility_calls)
-            logger.info(
-                "memory.timing op=retrieval_utility_update_aggregate trainer_global_step=%s calls=%s "
-                "total_sec=%.4f mean_sec=%.4f",
-                step_s,
-                self._timing_retrieval_utility_calls,
-                self._timing_retrieval_utility_sec,
-                mean_u,
+            print(
+                f"memory.timing op=retrieval_utility_update_aggregate trainer_global_step={step_s} "
+                f"calls={self._timing_retrieval_utility_calls} "
+                f"total_sec={self._timing_retrieval_utility_sec:.4f} mean_sec={mean_u:.4f}",
+                flush=True,
             )
         self._timing_retrieve_sec = 0.0
         self._timing_retrieve_calls = 0
@@ -247,11 +243,10 @@ class MemoryManager:
             t0 = time.perf_counter()
             self.store.update_records(updates)
             if self._log_operation_timing():
-                logger.info(
-                    "memory.timing op=episode_utility_update trainer_global_step=%s rows=%s elapsed_sec=%.4f",
-                    vu_step,
-                    len(updates),
-                    time.perf_counter() - t0,
+                print(
+                    f"memory.timing op=episode_utility_update trainer_global_step={vu_step} "
+                    f"rows={len(updates)} elapsed_sec={time.perf_counter() - t0:.4f}",
+                    flush=True,
                 )
 
     def _maybe_run_experience_utility_maintenance(self, trainer_global_step: int | None) -> None:
@@ -270,12 +265,11 @@ class MemoryManager:
             dt = time.perf_counter() - t0
             self._last_utility_clear_step = step
             self._last_utility_prune_step = step
-            logger.info("experience_utility: cleared memory store at global_step=%s", step)
+            print(f"experience_utility: cleared memory store at global_step={step}", flush=True)
             if self._log_operation_timing():
-                logger.info(
-                    "memory.timing op=utility_clear trainer_global_step=%s elapsed_sec=%.4f",
-                    step,
-                    dt,
+                print(
+                    f"memory.timing op=utility_clear trainer_global_step={step} elapsed_sec={dt:.4f}",
+                    flush=True,
                 )
             return
 
@@ -287,19 +281,16 @@ class MemoryManager:
             deleted = self.store.prune_low_utility_memories(threshold, min_uses)
             dt = time.perf_counter() - t0
             self._last_utility_prune_step = step
-            logger.info(
-                "experience_utility: pruned %s memories (threshold=%s min_uses=%s) at global_step=%s",
-                deleted,
-                threshold,
-                min_uses,
-                step,
+            print(
+                f"experience_utility: pruned {deleted} memories (threshold={threshold} min_uses={min_uses}) "
+                f"at global_step={step}",
+                flush=True,
             )
             if self._log_operation_timing():
-                logger.info(
-                    "memory.timing op=utility_prune trainer_global_step=%s deleted=%s elapsed_sec=%.4f",
-                    step,
-                    deleted,
-                    dt,
+                print(
+                    f"memory.timing op=utility_prune trainer_global_step={step} deleted={deleted} "
+                    f"elapsed_sec={dt:.4f}",
+                    flush=True,
                 )
 
     def append_retrieval_hint(self, prompt: str) -> str:
@@ -337,13 +328,11 @@ class MemoryManager:
             return "", None
 
         if bool(self.config.get("debug_retrieval", False)):
-            logger.info(
-                "memory.retrieve preview: trainer_global_step=%s resolved_retrieval_mode=%s "
-                "query_len=%s query_preview=%r",
-                self._trainer_global_step,
-                self.retrieval_mode(),
-                len(query_text),
-                truncate_text(query_text, 120),
+            print(
+                f"memory.retrieve preview: trainer_global_step={self._trainer_global_step} "
+                f"resolved_retrieval_mode={self.retrieval_mode()} query_len={len(query_text)} "
+                f"query_preview={truncate_text(query_text, 120)!r}",
+                flush=True,
             )
 
         t0 = time.perf_counter()

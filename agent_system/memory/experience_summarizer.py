@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,8 +32,6 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
-
-logger = logging.getLogger(__name__)
 
 # Defaults aligned with ``scripts/extract_memory_records.py`` (JSON extraction schema).
 DEFAULT_JSON_SYSTEM_PROMPT = """You are an expert agent-memory extraction system.
@@ -374,32 +372,31 @@ def _trim_ordered_steps_to_prompt_token_budget(
         try:
             user_msg = trajectory_user_prompt_template.format(**{**template_format_kwargs, "trajectory_text": plain})
         except KeyError as e:
-            logger.warning("experience_summarizer: template format failed during trim: %s", e)
+            print(f"experience_summarizer: template format failed during trim: {e}", flush=True)
             return None
         ntok = _count_summarizer_chat_tokens(tokenizer, system_prompt, user_msg, apply_kw)
         if ntok <= max_prompt_tokens:
             return plain
         rem = [i for i in range(len(cur)) if not prot[i]]
         if not rem:
-            logger.warning(
-                "experience_summarizer: chat still ~%s tokens (> budget %s) but all turns are retrieve-protected; skip.",
-                ntok,
-                max_prompt_tokens,
+            print(
+                f"experience_summarizer: chat still ~{ntok} tokens (> budget {max_prompt_tokens}) "
+                "but all turns are retrieve-protected; skip.",
+                flush=True,
             )
             return None
         if len(cur) <= min_turns:
-            logger.warning(
-                "experience_summarizer: chat ~%s tokens exceeds budget %s at min_turns=%s; skip trajectory.",
-                ntok,
-                max_prompt_tokens,
-                min_turns,
+            print(
+                f"experience_summarizer: chat ~{ntok} tokens exceeds budget {max_prompt_tokens} "
+                f"at min_turns={min_turns}; skip trajectory.",
+                flush=True,
             )
             return None
         drop_i = max(rem) if peel_right else min(rem)
         peel_right = not peel_right
         del cur[drop_i]
 
-    logger.warning("experience_summarizer: token trim exceeded iteration safety; skip.")
+    print("experience_summarizer: token trim exceeded iteration safety; skip.", flush=True)
     return None
 
 
@@ -433,10 +430,10 @@ def _prepare_trajectory_text_for_summarizer(
 
     min_turns = max(1, int(es.summarizer_trajectory_min_turns_kept))
     if len(selected) < min_turns:
-        logger.warning(
-            "experience_summarizer: after head/tail selection only %s turns (< min_turns=%s); skip.",
-            len(selected),
-            min_turns,
+        print(
+            f"experience_summarizer: after head/tail selection only {len(selected)} turns "
+            f"(< min_turns={min_turns}); skip.",
+            flush=True,
         )
         return None
 
@@ -712,7 +709,7 @@ def _summarize_batch_teacher(
                 return _http_chat_completion(url, headers, payload, timeout)
             except Exception as e:
                 last_err = e
-                logger.warning("experience_summarizer teacher attempt %s failed: %s", attempt, e)
+                print(f"experience_summarizer teacher attempt {attempt} failed: {e}", flush=True)
                 if attempt < max_retries:
                     time.sleep(delay)
                     delay *= 2
@@ -776,11 +773,10 @@ def _summarizer_max_prompt_tokens(config: DictConfig) -> int:
     if v <= 0:
         return engine_cap
     if v > engine_cap:
-        logger.warning(
-            "experience_summarizer: summarizer_max_prompt_tokens=%s exceeds vLLM prompt cap %s "
+        print(
+            f"experience_summarizer: summarizer_max_prompt_tokens={v} exceeds vLLM prompt cap {engine_cap} "
             "(raise actor_rollout_ref.rollout.max_model_len); clamping.",
-            v,
-            engine_cap,
+            flush=True,
         )
     return min(v, engine_cap)
 
@@ -848,17 +844,14 @@ def _chunk_ranges(length: int, chunk_size: int) -> List[Tuple[int, int]]:
 def _parse_memories_from_model_output(raw: str) -> list[dict[str, Any]]:
     stripped = (raw or "").strip()
     if not stripped:
-        logger.debug("experience_summarizer: empty extractor output; skip JSON parse")
+        print("experience_summarizer: empty extractor output; skip JSON parse", flush=True)
         return []
     try:
         obj = extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as e:
         preview = stripped[:240].replace("\n", " ")
-        logger.warning(
-            "experience_summarizer: JSON parse failed: %s | preview=%r",
-            e,
-            preview + ("…" if len(stripped) > 240 else ""),
-        )
+        pv = preview + ("…" if len(stripped) > 240 else "")
+        print(f"experience_summarizer: JSON parse failed: {e} | preview={pv!r}", flush=True)
         return []
     if "memories" not in obj:
         return []
@@ -1182,7 +1175,7 @@ def maybe_summarize_and_write_experiences(
         return 0
     rm = memory_manager
     if not rm.enabled or rm.store is None:
-        logger.debug("experience_summarizer: memory store unavailable; skip.")
+        print("experience_summarizer: memory store unavailable; skip.", flush=True)
         return 0
 
     mem = config.env.memory
@@ -1210,10 +1203,10 @@ def maybe_summarize_and_write_experiences(
     batch_size = len(total_batch_list)
     uid_arr = grpo_group_uid
     if uid_arr is not None and len(uid_arr) != batch_size:
-        logger.warning(
-            "experience_summarizer: grpo_group_uid length %s != batch_size %s; ignoring group ids for subsample.",
-            len(uid_arr),
-            batch_size,
+        print(
+            f"experience_summarizer: grpo_group_uid length {len(uid_arr)} != batch_size {batch_size}; "
+            "ignoring group ids for subsample.",
+            flush=True,
         )
         uid_arr = None
 
@@ -1252,9 +1245,10 @@ def maybe_summarize_and_write_experiences(
         )
         if not traj_for_llm or not traj_for_llm.strip():
             if traj_full_plain.strip():
-                logger.info(
-                    "experience_summarizer: env %s has no summarizer prompt after prepare; skip (no full-trajectory insert).",
-                    i,
+                print(
+                    f"experience_summarizer: env {i} has no summarizer prompt after prepare; "
+                    "skip (no full-trajectory insert).",
+                    flush=True,
                 )
             continue
         try:
@@ -1263,7 +1257,10 @@ def maybe_summarize_and_write_experiences(
                 **fmt_base,
             )
         except KeyError as e:
-            logger.warning("experience_summarizer: template placeholder missing: %s; skip env %s.", e, i)
+            print(
+                f"experience_summarizer: template placeholder missing: {e}; skip env {i}.",
+                flush=True,
+            )
             continue
         candidates.append(
             {
@@ -1290,12 +1287,10 @@ def maybe_summarize_and_write_experiences(
             total_batch_list=total_batch_list,
             rng=rng,
         )
-        logger.info(
-            "experience_summarizer: grpo_writeback_subsample keep_fraction=%s group_n=%s candidates %s -> %s",
-            keep_fraction,
-            group_n,
-            n_before,
-            len(candidates),
+        print(
+            f"experience_summarizer: grpo_writeback_subsample keep_fraction={keep_fraction} group_n={group_n} "
+            f"candidates {n_before} -> {len(candidates)}",
+            flush=True,
         )
 
     trajectory_user_messages = [str(c["user_message"]) for c in candidates]
@@ -1317,7 +1312,7 @@ def maybe_summarize_and_write_experiences(
     chat_prompts: List[str] | None = None
     if mode == "self":
         if actor_rollout_wg is None:
-            logger.warning("experience_summarizer mode=self but actor_rollout_wg is None; skip.")
+            print("experience_summarizer mode=self but actor_rollout_wg is None; skip.", flush=True)
             return 0
         chat_prompts = [
             _build_chat_prompt(
@@ -1369,37 +1364,32 @@ def maybe_summarize_and_write_experiences(
                 if recs:
                     continue
                 if parse_attempts[idx] >= parse_max_attempts:
-                    logger.warning(
-                        "experience_summarizer: trajectory index %s (env %s) still has no valid memories "
-                        "after %s attempt(s); giving up.",
-                        idx,
-                        pending_rollouts[idx][0],
-                        parse_attempts[idx],
+                    print(
+                        f"experience_summarizer: trajectory index {idx} (env {pending_rollouts[idx][0]}) "
+                        f"still has no valid memories after {parse_attempts[idx]} attempt(s); giving up.",
+                        flush=True,
                     )
                     continue
                 next_active.append(idx)
 
             if next_active:
-                logger.info(
-                    "experience_summarizer: re-running extraction for %s trajectory(s) with empty/invalid parse "
-                    "(attempt cap %s per trajectory).",
-                    len(next_active),
-                    parse_max_attempts,
+                print(
+                    f"experience_summarizer: re-running extraction for {len(next_active)} trajectory(s) "
+                    f"with empty/invalid parse (attempt cap {parse_max_attempts} per trajectory).",
+                    flush=True,
                 )
             active = next_active
     except Exception:
-        logger.exception("experience_summarizer failed during model calls; no records written.")
+        print("experience_summarizer failed during model calls; no records written.", flush=True)
+        traceback.print_exc()
         return 0
 
     t_infer_elapsed = time.perf_counter() - t_infer_0
     if want_timing:
-        logger.info(
-            "memory.timing op=experience_summarize_infer trainer_global_step=%s pending_traj=%s "
-            "while_iterations=%s elapsed_sec=%.4f",
-            step_s,
-            n_pending,
-            infer_rounds,
-            t_infer_elapsed,
+        print(
+            f"memory.timing op=experience_summarize_infer trainer_global_step={step_s} "
+            f"pending_traj={n_pending} while_iterations={infer_rounds} elapsed_sec={t_infer_elapsed:.4f}",
+            flush=True,
         )
 
     records: List[MemoryRecord] = []
@@ -1426,15 +1416,15 @@ def maybe_summarize_and_write_experiences(
         t_ins_0 = time.perf_counter()
         rm.store.add_records(records)
         ins_dt = time.perf_counter() - t_ins_0
-        logger.info("experience_summarizer wrote %s memory record(s) (mode=%s).", len(records), mode)
+        print(f"experience_summarizer wrote {len(records)} memory record(s) (mode={mode}).", flush=True)
         if want_timing:
-            logger.info(
-                "memory.timing op=experience_summarize_insert trainer_global_step=%s records=%s elapsed_sec=%.4f",
-                step_s,
-                len(records),
-                ins_dt,
+            print(
+                f"memory.timing op=experience_summarize_insert trainer_global_step={step_s} "
+                f"records={len(records)} elapsed_sec={ins_dt:.4f}",
+                flush=True,
             )
     except Exception:
-        logger.exception("experience_summarizer failed to add_records.")
+        print("experience_summarizer failed to add_records.", flush=True)
+        traceback.print_exc()
         return 0
     return len(records)

@@ -255,7 +255,7 @@ reward_model:
     # AlfWorld ``alfworld_projection`` / memory ``extract_query`` only consume the first block; extras are protocol drift.
     max_think_segments: 0
     max_action_segments: 1
-    max_memory_retrieve_segments: 6
+    max_memory_retrieve_segments: 5
     search_data_source_substrings:
       - search
     min_segment_chars: 5
@@ -430,7 +430,7 @@ env:
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
       clear_every_n_global_steps: 0  # 0 = disabled; if >0, drops and recreates empty collection every N steps (runs before prune).
-    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
+    count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
     server_advertised_host: null   # Host advertised to workers; auto-detected when null.

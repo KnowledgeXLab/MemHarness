@@ -1507,6 +1507,11 @@ class RayPPOTrainer:
                     del batch
                     batch = gen_batch_output
 
+                    _rollout_rt = (batch.meta_info or {}).get("rollout_timing_s")
+                    if _rollout_rt:
+                        for _rk, _rv in _rollout_rt.items():
+                            metrics[f"timing_s/rollout_{_rk}"] = float(_rv)
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
                         step_rewards_tensor = core_gigpo.compute_step_discounted_returns(
                             batch=batch,
