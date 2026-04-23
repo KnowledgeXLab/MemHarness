@@ -100,10 +100,12 @@ Output one JSON object only. No markdown fences, no commentary before or after t
 Requirements:
 - Ground every principle in the trajectory; do not invent facts.
 - One clear English sentence per principle (core advice). No bullet lists inside memory_text.
-- Prefer strategies that explain what to do or check, not a play-by-play recap of this episode."""
+- Prefer strategies that explain what to do or check, not a play-by-play recap of this episode.
+- Generalize: do not copy long strings of object disambiguators (e.g. "tomato 4", "cabinet 3") unless one short mention is needed; prefer "the target object", "the goal receptacle", or the object class.
+- Each principle should be one coherent subgoal or check; do not merge unrelated steps into one sentence, and do not output principles that contradict each other for the same object."""
 
 DEFAULT_COMPACT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE = """Benchmark: "{task_name}".
-The trajectory below is from a episode of the benchmark. Extract at most {num_memories} Guiding or Warning Principles.
+The trajectory below is from one episode. Extract at most {num_memories} short principles (not raw action traces).
 Each principle must be independently useful if stored in a memory bank and retrieved later.
 
 Return JSON exactly in this shape. ``source_step`` is optional (1-based index of the agent turn the principle is grounded in).

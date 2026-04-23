@@ -13,9 +13,8 @@ ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="online"
+export WANDB_MODE="offline"
 
-# 仅 global_pool：Reasoning + Ref（GRPO KL）等，无 mem_adaptor 专用池
 trainer_n_gpus_per_node=8
 GPU_NUM="${trainer_n_gpus_per_node}"
 
@@ -72,9 +71,9 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-1"
+EXPERIMENT_NAME="train_evolver-3B"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
-MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
+MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
@@ -140,7 +139,7 @@ fi
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
-RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH'], 'WANDB_MODE': os.environ['WANDB_MODE']}}))")"
+RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH']}}))")"
 
 REMOTE_VDB_CLI=()
 MEMORY_REMOTE_SLURM_LC="$(printf '%s' "${MEMORY_REMOTE_SLURM:-false}" | tr '[:upper:]' '[:lower:]')"

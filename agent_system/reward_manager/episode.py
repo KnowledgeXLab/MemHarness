@@ -122,19 +122,42 @@ class EpisodeRewardManager:
         for rows in by_traj.values():
             rows.sort(key=lambda x: x["i"])
 
+        meta = data.meta_info or {}
+        trainer_step_raw = meta.get("trainer_global_step")
+        try:
+            trainer_step_i = int(trainer_step_raw) if trainer_step_raw is not None else None
+        except (TypeError, ValueError):
+            trainer_step_i = None
+        warmup_steps = int(OmegaConf.select(fr, "format_warmup_global_steps", default=0) or 0)
+        in_format_warmup = (
+            warmup_steps > 0
+            and trainer_step_i is not None
+            and trainer_step_i < warmup_steps
+        )
+        warmup_wfmt_mult = float(OmegaConf.select(fr, "warmup_weight_format_multiplier", default=0.0) or 0.0)
+        warmup_req_mem = OmegaConf.select(fr, "warmup_require_memory_retrieve", default=None)
+        warmup_pen_cn = OmegaConf.select(fr, "warmup_penalize_chinese_chars", default=None)
+
         traj_format: dict[str, tuple[float, dict[str, float]]] = {}
         for tu, rows in by_traj.items():
             format_score = 0.0
             fmt_metrics = empty_format_reward_metrics()
             applied_format = False
+            w_format_step = w_format
             if fr_enabled and w_format != 0.0:
                 applied_format = True
+                if in_format_warmup:
+                    w_format_step = w_format * warmup_wfmt_mult
                 min_seg = int(fr.min_segment_chars)
                 req_mem = bool(fr.require_memory_retrieve)
+                if in_format_warmup and warmup_req_mem is not None:
+                    req_mem = bool(warmup_req_mem)
                 w_t = float(fr.weight_think)
                 w_a = float(fr.weight_action)
                 w_m = float(fr.weight_memory)
                 pen_cn = bool(fr.penalize_chinese_chars)
+                if in_format_warmup and warmup_pen_cn is not None:
+                    pen_cn = bool(warmup_pen_cn)
                 max_think = int(fr.max_think_segments)
                 max_action = int(fr.max_action_segments)
                 max_mem_seg = int(fr.max_memory_retrieve_segments)
@@ -196,7 +219,7 @@ class EpisodeRewardManager:
             format_score, fmt_metrics, applied_format = traj_format[tu]
 
             if fr_enabled and applied_format:
-                final_score = w_outcome * outcome + w_format * format_score
+                final_score = w_outcome * outcome + w_format_step * format_score
             else:
                 final_score = w_outcome * outcome
 

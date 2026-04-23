@@ -1559,9 +1559,17 @@ class RayPPOTrainer:
                                     config=self.config,
                                     samples=buf,
                                     gen_batch_output=batch,
+                                    tokenizer=self.traj_collector.adaptor_tokenizer,
                                 )
                                 if ma_batch is not None and len(ma_batch) > 0:
                                     ma_batch = prepare_adaptor_batch_for_rl(ma_batch, self.config)
+                                    if ma_batch.meta_info:
+                                        _npt = ma_batch.meta_info.get("mem_adaptor_english_shaping_total")
+                                        _npi = ma_batch.meta_info.get("mem_adaptor_english_shaping_penalized")
+                                        if _npt is not None and float(_npt) > 0.0:
+                                            metrics["mem_adaptor/english_shaping_penalty_rate"] = float(
+                                                _npi or 0.0
+                                            ) / float(_npt)
                                     ma_batch.batch["response_mask"] = compute_response_mask(ma_batch)
                                     ma_batch.meta_info["global_token_num"] = torch.sum(
                                         ma_batch.batch["attention_mask"], dim=-1

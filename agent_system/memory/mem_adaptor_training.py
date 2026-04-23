@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
@@ -20,6 +21,44 @@ from collections import Counter
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.utils.dataset.rl_dataset import collate_fn
+
+# Default: penalize CJK, Japanese kana, Hangul, Cyrillic, Arabic (non–English-only completions for AlfWorld-style English tasks).
+_GRPO_ENGLISH_SHAPING_DEFAULT_RE = re.compile(
+    r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]"
+)
+
+
+def _decode_adaptor_response_row(tokenizer: "PreTrainedTokenizer", resp: torch.Tensor, pad_id: int) -> str:
+    row = resp.long().detach().cpu()
+    mask = row != int(pad_id)
+    if not mask.any():
+        return ""
+    try:
+        return tokenizer.decode(row[mask], skip_special_tokens=True).strip()
+    except Exception:
+        return ""
+
+
+def _mem_adaptor_grpo_english_shaping_delta(ma: DictConfig, response_text: str) -> tuple[float, bool]:
+    """Return (scalar delta added to outcome reward, whether penalty applied)."""
+    gs = OmegaConf.select(ma, "grpo_english_shaping", default=None)
+    if gs is None or not bool(gs.get("enable", False)):
+        return 0.0, False
+    text = (response_text or "").strip()
+    if not text:
+        return 0.0, False
+    pat_s = gs.get("pattern")
+    if pat_s is not None and str(pat_s).strip():
+        try:
+            pat = re.compile(str(pat_s), re.UNICODE)
+        except re.error:
+            pat = _GRPO_ENGLISH_SHAPING_DEFAULT_RE
+    else:
+        pat = _GRPO_ENGLISH_SHAPING_DEFAULT_RE
+    if pat.search(text):
+        penalty = float(gs.get("penalty", 0.5))
+        return -abs(penalty), True
+    return 0.0, False
 
 
 def scale_adaptor_grpo_advantages_by_traj_adaptor_steps(batch: DataProto, enabled: bool) -> None:
@@ -204,6 +243,7 @@ def build_memory_adaptor_grpo_batch(
     config: DictConfig,
     samples: List[Dict[str, Any]],
     gen_batch_output: DataProto,
+    tokenizer: Optional["PreTrainedTokenizer"] = None,
 ) -> Optional[DataProto]:
     """
     Collate adaptor rollout rows and attach outcome reward on the last non-pad response token.
@@ -212,12 +252,18 @@ def build_memory_adaptor_grpo_batch(
     int pad_token_id; str traj_uid; ``grpo_index`` = Reasoning GRPO group uid (shared across the
     ``env.rollout.n`` parallel envs) so ``compute_grpo_outcome_advantage`` dedupes one return per
     ``(uid, traj_uid)`` and compares across trajectories in the same group.
+
+    Pass ``tokenizer`` = adaptor tokenizer (same as ``TrajectoryCollector.adaptor_tokenizer``) so
+    GRPO auxiliary shaping (e.g. ``grpo_english_shaping``) decodes responses correctly.
     """
     if not samples:
         return None
     rmap = _traj_uid_to_episode_reward(gen_batch_output)
     rl = int(config.mem_adaptor.actor_rollout_ref.rollout.response_length)
+    ma = config.mem_adaptor
     rows: List[dict] = []
+    n_shaping_pen = 0
+    n_shaping_tot = 0
     for s in samples:
         tid = str(s["traj_uid"])
         r = float(rmap.get(tid, 0.0))
@@ -232,7 +278,12 @@ def build_memory_adaptor_grpo_batch(
         nz = (seg != pad_id).nonzero(as_tuple=True)[0]
         last = int(nz[-1].item()) if nz.numel() > 0 else max(eff - 1, 0)
         last = min(last, rl - 1)
-        scores[last] = r
+        n_shaping_tot += 1
+        dec = _decode_adaptor_response_row(tokenizer, resp, pad_id) if tokenizer is not None else ""
+        delta, shaped = _mem_adaptor_grpo_english_shaping_delta(ma, dec)
+        if shaped:
+            n_shaping_pen += 1
+        scores[last] = r + delta
         row = {
             "prompts": s["prompts"],
             "responses": s["responses"],
@@ -247,9 +298,13 @@ def build_memory_adaptor_grpo_batch(
 
     data = collate_fn(rows)
     ref_rollout = config.mem_adaptor.actor_rollout_ref.rollout
+    meta: Dict[str, Any] = {"temperature": float(ref_rollout.temperature)}
+    if n_shaping_tot > 0:
+        meta["mem_adaptor_english_shaping_penalized"] = float(n_shaping_pen)
+        meta["mem_adaptor_english_shaping_total"] = float(n_shaping_tot)
     return DataProto.from_single_dict(
         data=data,
-        meta_info={"temperature": float(ref_rollout.temperature)},
+        meta_info=meta,
     )
 
 

@@ -29,6 +29,33 @@ def _mem_cfg(config: DictConfig) -> DictConfig:
     return ma if ma is not None else OmegaConf.create({})
 
 
+def _plain_dict_chat_kw(obj: Any) -> dict:
+    """OmegaConf ``to_container`` rejects plain dicts; runtime may already resolve to dict."""
+    if obj is None:
+        return {}
+    if OmegaConf.is_config(obj):
+        return dict(OmegaConf.to_container(obj, resolve=True) or {})
+    if isinstance(obj, dict):
+        return dict(obj)
+    return {}
+
+
+def adaptor_apply_chat_template_kwargs(config: DictConfig, ma: Optional[DictConfig] = None) -> dict:
+    """Kwargs passed to ``tokenizer.apply_chat_template`` when building adaptor prompts.
+
+    If ``mem_adaptor.apply_chat_template_kwargs`` is **non-null**, it wins; otherwise
+    ``data.apply_chat_template_kwargs`` is used. The **adaptor** ``PreTrainedTokenizer``
+    (``mem_adaptor.actor_rollout_ref.model.path``) must match this template (same model
+    family / instruct format as intended); mismatch can encourage garbage completions.
+    """
+    ma = ma if ma is not None else _mem_cfg(config)
+    ma_kw = OmegaConf.select(ma, "apply_chat_template_kwargs", default=None)
+    if ma_kw is not None:
+        return _plain_dict_chat_kw(ma_kw)
+    data_kw = OmegaConf.select(config, "data.apply_chat_template_kwargs", default={}) or {}
+    return _plain_dict_chat_kw(data_kw)
+
+
 def mem_adaptor_enabled(config: DictConfig) -> bool:
     ma = _mem_cfg(config)
     return bool(ma.get("enable", False))
@@ -411,7 +438,7 @@ def maybe_apply_memory_adaptor(
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id
-    chat_kw = OmegaConf.to_container(config.data["apply_chat_template_kwargs"], resolve=True) or {}
+    chat_kw = adaptor_apply_chat_template_kwargs(config, ma)
 
     row_env_indices: List[int] = []
     rows: List[dict] = []

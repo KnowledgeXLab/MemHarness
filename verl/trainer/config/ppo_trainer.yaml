@@ -276,6 +276,14 @@ reward_model:
     answer_close_tag: "</answer>"
     memory_open_tag: ${env.memory.retrieval_query_open_tag}
     memory_close_tag: ${env.memory.retrieval_query_close_tag}
+    # Early training: relax format shaping using trainer global_step (see rollout ``meta_info.trainer_global_step``).
+    # 0 = disabled. While step < format_warmup_global_steps: effective format weight is
+    #   weight_format * warmup_weight_format_multiplier
+    # and optional overrides below apply when set (non-null).
+    format_warmup_global_steps: 0
+    warmup_weight_format_multiplier: 0.0
+    warmup_require_memory_retrieve: null
+    warmup_penalize_chinese_chars: null
 custom_reward_function:
   path: null
   name: compute_score
@@ -573,8 +581,17 @@ mem_adaptor:
   adapted_injection_prefix: "Adapted memory principle:\n"
   placeholder_old_state: "(none)"
   placeholder_old_principle: "(none)"
-  max_new_tokens: 512
+  # Non-null: overrides data.apply_chat_template_kwargs for adaptor apply_chat_template only.
+  # Use the adaptor tokenizer (mem_adaptor.model.path); kwargs should match that checkpoint's chat format.
+  apply_chat_template_kwargs: null
+  # GRPO auxiliary: subtract penalty from outcome reward on the scored token when decoded response matches pattern.
+  # Default pattern: CJK, kana, Hangul, Cyrillic, Arabic. Set pattern: null uses default; or a custom regex string.
+  grpo_english_shaping:
+    enable: true
+    penalty: 0.5
+    pattern: null
+  max_new_tokens: 256
   max_prompt_chars: 12000
   do_sample: true
-  temperature: 0.7
+  temperature: 1
   top_p: 1.0
