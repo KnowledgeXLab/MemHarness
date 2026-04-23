@@ -32,7 +32,7 @@ WANDB_OFFLINE_SYNC_RUN_DIRS=(
   # 示例:
   # "/abs/path/to/repo/wandb/offline-run-20260421_112141-xxxxxxxx"
   "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260423_104140-uu5sxymz"
-  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260423_114826-fg6xgshc"
+  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260423_185638-9nbyrpx8"
 
 
 )

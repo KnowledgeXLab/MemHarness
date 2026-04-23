@@ -214,6 +214,13 @@ class EpisodeRewardManager:
                 max_mem_seg = int(fr.max_memory_retrieve_segments)
                 data_source = rows[0]["data_source"]
                 step_texts = [str(x["response_str"]) for x in rows]
+                env_mrc = rows[0].get("memory_retrieval_counts")
+                env_mrc_i: int | None = None
+                if env_mrc is not None:
+                    try:
+                        env_mrc_i = int(float(np.asarray(env_mrc, dtype=np.float64).reshape(-1)[0]))
+                    except Exception:
+                        env_mrc_i = None
                 if use_search_format_reward(str(data_source), search_markers):
                     out = compute_search_think_memory_format_reward_multi_step(
                         step_texts,
@@ -252,6 +259,7 @@ class EpisodeRewardManager:
                         max_think_segments=max_think,
                         max_action_segments=max_action,
                         max_memory_retrieve_segments=max_mem_seg,
+                        env_trajectory_memory_retrieval_count=env_mrc_i,
                     )
                 format_score = float(out.reward)
                 fmt_metrics = out.metrics

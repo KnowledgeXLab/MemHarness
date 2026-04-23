@@ -7,7 +7,7 @@
 # 论文框架见 https://arxiv.org/abs/2510.16079
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.23:8265'
+export RAY_ADDRESS='http://10.140.37.38:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -252,7 +252,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
       trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
       trainer.nnodes=1 \
-      trainer.save_freq=50 \
+      trainer.save_freq=30 \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \

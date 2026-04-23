@@ -38,12 +38,32 @@ _REWARD_DECOMP_SCALAR_KEYS = (
 )
 
 
+def _first_row_per_traj_uid(traj_uid: np.ndarray, n: int) -> np.ndarray:
+    """Indices of the first row for each unique traj_uid (length <= n)."""
+    if n <= 0:
+        return np.array([], dtype=np.int64)
+    seen: set = set()
+    idxs: list[int] = []
+    for j in range(min(n, len(traj_uid))):
+        u = traj_uid[j]
+        if u not in seen:
+            seen.add(u)
+            idxs.append(j)
+    return np.asarray(idxs, dtype=np.int64)
+
+
 def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
-    """Mean for all logged reward-decomposition rows; min/max only for outcome/format/combined scalars."""
+    """Mean for all logged reward-decomposition rows; min/max only for outcome/format/combined scalars.
+
+    EpisodeRewardManager repeats the same trajectory-level scalars on every env-step row; we aggregate
+    with one value per ``traj_uid`` so means match per-trajectory averages (e.g. align with
+    ``memory/retrieval_count_mean_per_traj``).
+    """
     out: Dict[str, Any] = {}
     ntb = batch.non_tensor_batch
     decomp = _REWARD_DECOMP_SCALAR_KEYS
     extras = tuple(FORMAT_REWARD_EXTRA_KEYS)
+    traj_uid = ntb.get("traj_uid")
     for key in decomp + extras:
         if key not in ntb:
             continue
@@ -56,10 +76,16 @@ def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
             "format_reward_scalar": "format",
             "combined_reward_scalar": "combined",
         }.get(key, key)
-        out[f"reward/{short}/mean"] = float(np.mean(arr))
+        arr_m = arr
+        if traj_uid is not None:
+            tu = np.asarray(traj_uid).reshape(-1)
+            if tu.size == arr.size:
+                idx = _first_row_per_traj_uid(tu, arr.size)
+                arr_m = arr[idx]
+        out[f"reward/{short}/mean"] = float(np.mean(arr_m))
         if key in decomp:
-            out[f"reward/{short}/min"] = float(np.min(arr))
-            out[f"reward/{short}/max"] = float(np.max(arr))
+            out[f"reward/{short}/min"] = float(np.min(arr_m))
+            out[f"reward/{short}/max"] = float(np.max(arr_m))
     return out
 
 

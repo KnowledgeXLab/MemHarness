@@ -6,14 +6,15 @@
 # Segment caps (see ``max_*_segments`` in config): AlfWorld projection uses the first ``<action>`` pair only;
 # ``MemoryManager.extract_query`` uses the first retrieval block only — rewards should not treat duplicates as valid.
 # Multi-turn: ``EpisodeRewardManager`` uses :func:`compute_generic_action_think_memory_format_reward_multi_step`:
-# think/action bounds apply **per step**; memory-retrieve count is **summed over the trajectory** vs
-# ``max_memory_retrieve_segments``.
+# think/action bounds apply **per step**; memory-retrieve count for scoring defaults to summing XML
+# segments, but should match the env counter ``memory_retrieval_counts`` when passed in so reward
+# aligns with ``memory/retrieval_count_*`` (see ``env_trajectory_memory_retrieval_count``).
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 # Keys appended per row to ``reward_extra_info`` (aligned lengths for trainer logging).
 FORMAT_REWARD_EXTRA_KEYS = (
@@ -184,13 +185,16 @@ def compute_generic_action_think_memory_format_reward_multi_step(
     max_think_segments: int = 0,
     max_action_segments: int = 1,
     max_memory_retrieve_segments: int = 1,
+    env_trajectory_memory_retrieval_count: Optional[int] = None,
 ) -> GenericFormatRewardOutput:
     """Format reward over a full trajectory (multi-turn rollout rows share ``traj_uid``).
 
     - **think / action**: each non-empty step must satisfy the same per-step bounds as
       :func:`compute_generic_action_think_memory_format_reward`.
-    - **memory retrieve**: valid segments are **summed across all steps** and compared to
-      ``max_memory_retrieve_segments`` (trajectory-wide cap).
+    - **memory retrieve**: when ``env_trajectory_memory_retrieval_count`` is set, that value
+      (same rule as rollout ``memory_retrieval_counts``) is used for the trajectory-wide memory
+      count and for ``format_memory_retrieve_count``; otherwise valid XML segments are summed
+      across steps and compared to ``max_memory_retrieve_segments``.
     """
     texts = [s or "" for s in step_responses]
     metrics = _zero_metrics()
@@ -234,6 +238,12 @@ def compute_generic_action_think_memory_format_reward_multi_step(
             think_over_any = True
         if aover:
             action_over_any = True
+
+    if env_trajectory_memory_retrieval_count is not None:
+        try:
+            sum_mem = max(0, int(env_trajectory_memory_retrieval_count))
+        except (TypeError, ValueError):
+            pass
 
     metrics["format_think_count"] = sum_think
     metrics["format_action_count"] = sum_action
@@ -542,7 +552,23 @@ def _run_self_tests() -> None:
     )
     assert abs(m12.reward - 1.0) < 1e-9 and m12.metrics["format_memory_retrieve_count"] == 1, m12
 
-    print("format_reward self-tests: OK (14 checks)")
+    # 13) 与 env 计数对齐：无 XML 检索段，但 rollout 记 2 次检索 → 计入 format_memory_retrieve_count，可选记忆下超限硬清零
+    m13 = compute_generic_action_think_memory_format_reward_multi_step(
+        [
+            "<think>abc</think><action>run</action>",
+            "<think>def</think><action>go</action>",
+        ],
+        **T,
+        env_trajectory_memory_retrieval_count=2,
+    )
+    assert (
+        m13.metrics["format_memory_retrieve_count"] == 2
+        and m13.metrics["format_memory_over_limit"] == 1
+        and m13.metrics["format_protocol_hard_zero"] == 1
+        and m13.reward == 0.0
+    ), m13
+
+    print("format_reward self-tests: OK (15 checks)")
 
 
 if __name__ == "__main__":
