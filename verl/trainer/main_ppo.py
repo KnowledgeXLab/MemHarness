@@ -263,13 +263,18 @@ class TaskRunner:
             reward_manager_name = config.reward_model.get("reward_manager", "episode")
             if reward_manager_name == 'episode':
                 from agent_system.reward_manager import EpisodeRewardManager
+                from agent_system.reward_manager.episode import (
+                    DEFAULT_NUM_EXAMINE_TRAIN,
+                    DEFAULT_NUM_EXAMINE_VAL,
+                )
+
                 reward_manager_cls = EpisodeRewardManager
             else:
                 raise NotImplementedError
 
             reward_fn = reward_manager_cls(
                 tokenizer=tokenizer,
-                num_examine=20,
+                num_examine=DEFAULT_NUM_EXAMINE_TRAIN,
                 normalize_by_length=False,
                 config=config,
             )
@@ -277,7 +282,7 @@ class TaskRunner:
             # Note that we always use function-based RM for validation
             val_reward_fn = reward_manager_cls(
                 tokenizer=tokenizer,
-                num_examine=20,
+                num_examine=DEFAULT_NUM_EXAMINE_VAL,
                 normalize_by_length=False,
                 config=config,
             )

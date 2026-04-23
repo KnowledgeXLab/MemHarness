@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import random
 from collections import defaultdict
 
 import numpy as np
@@ -29,6 +30,53 @@ from agent_system.reward_manager.format_reward import (
     empty_format_reward_metrics,
     use_search_format_reward,
 )
+
+# EpisodeRewardManager stdout sampling defaults (kept in code; not duplicated in ppo_trainer.yaml).
+DEFAULT_NUM_EXAMINE_TRAIN = 20
+DEFAULT_NUM_EXAMINE_VAL = 0
+DEFAULT_EPISODE_TRAJ_SAMPLE_EVERY_N_TRAINER_STEPS = 3
+
+
+def _mem_query_flag(x) -> bool:
+    if x is None:
+        return False
+    try:
+        return bool(np.asarray(x, dtype=bool).reshape(-1)[0])
+    except Exception:
+        return bool(x)
+
+
+def _empty_retrieval_message_strip(cfg: DictConfig) -> str:
+    try:
+        raw = OmegaConf.select(cfg, "env.memory.empty_retrieval_message", default="")
+        return str(raw or "").strip()
+    except Exception:
+        return ""
+
+
+def _traj_memory_flags(rows: list[dict], empty_inject_msg: str) -> tuple[bool, bool]:
+    """(has_retrieval, has_nonempty_recall) for one trajectory's rows."""
+    mrc0 = rows[0].get("memory_retrieval_counts")
+    try:
+        mrc = float(np.asarray(mrc0, dtype=np.float64).reshape(-1)[0])
+    except Exception:
+        mrc = 0.0
+    has_retrieval = mrc > 0.0
+    if not has_retrieval:
+        for r in rows:
+            if _mem_query_flag(r.get("memory_query_mask")):
+                has_retrieval = True
+                break
+    has_hit = False
+    for r in rows:
+        inj = r.get("memory_injected_text")
+        if inj is None:
+            continue
+        s = str(inj).strip()
+        if s and s != empty_inject_msg:
+            has_hit = True
+            break
+    return has_retrieval, has_hit
 
 
 class EpisodeRewardManager:
@@ -58,7 +106,6 @@ class EpisodeRewardManager:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info: dict[str, list] = defaultdict(list)
 
-        already_print_data_sources = {}
         fr = self._fr
         fr_enabled = bool(fr.enable)
         w_outcome = float(fr.weight_outcome)
@@ -102,6 +149,7 @@ class EpisodeRewardManager:
 
             tu = data_item.non_tensor_batch.get("traj_uid")
             traj_uid_s = str(tu) if tu is not None else str(i)
+            ntb = data_item.non_tensor_batch
 
             row_infos.append(
                 {
@@ -113,6 +161,9 @@ class EpisodeRewardManager:
                     "outcome": outcome,
                     "valid_response_length": int(valid_response_length),
                     "prompt_ids": prompt_ids,
+                    "memory_query_mask": ntb.get("memory_query_mask"),
+                    "memory_injected_text": ntb.get("memory_injected_text"),
+                    "memory_retrieval_counts": ntb.get("memory_retrieval_counts"),
                 }
             )
 
@@ -206,6 +257,58 @@ class EpisodeRewardManager:
                 fmt_metrics = out.metrics
             traj_format[tu] = (format_score if applied_format else 0.0, fmt_metrics, applied_format)
 
+        # Print one full trajectory per qualifying reward batch (num_examine > 0), throttled by global step.
+        _every = max(1, int(DEFAULT_EPISODE_TRAJ_SAMPLE_EVERY_N_TRAINER_STEPS))
+        _do_traj_print = self.num_examine > 0 and bool(by_traj)
+        if _do_traj_print and _every > 1:
+            if trainer_step_i is None:
+                _do_traj_print = False
+            elif trainer_step_i % _every != 0:
+                _do_traj_print = False
+        if _do_traj_print:
+            empty_inj = _empty_retrieval_message_strip(self.config)
+            all_uids = list(by_traj.keys())
+            tier_hit: list[str] = []
+            tier_retrieve_only: list[str] = []
+            for tu_k in all_uids:
+                hr, hh = _traj_memory_flags(by_traj[tu_k], empty_inj)
+                if hr and hh:
+                    tier_hit.append(tu_k)
+                elif hr:
+                    tier_retrieve_only.append(tu_k)
+            pick_pool = tier_hit or tier_retrieve_only or all_uids
+            tier_name = "retrieve+recall" if tier_hit else ("retrieve_only" if tier_retrieve_only else "fallback")
+            tu_pick = random.choice(pick_pool)
+            ds_pick = by_traj[tu_pick][0]["data_source"]
+            fs_pick, _, app_pick = traj_format[tu_pick]
+            out_pick = float(by_traj[tu_pick][0]["outcome"])
+            wfs = w_format
+            if fr_enabled and w_format != 0.0:
+                if in_format_warmup:
+                    wfs = w_format * warmup_wfmt_mult
+            fin_pick = (
+                w_outcome * out_pick + wfs * fs_pick
+                if fr_enabled and app_pick
+                else w_outcome * out_pick
+            )
+            print(
+                f"[{ds_pick}][traj_sample] uid={tu_pick} tier={tier_name} "
+                f"outcome={out_pick} format={fs_pick} final={fin_pick}",
+                flush=True,
+            )
+            for r in by_traj[tu_pick]:
+                print(f"[{ds_pick}][prompt]", r["prompt_str"], flush=True)
+                print(f"[{ds_pick}][response]", r["response_str"], flush=True)
+                print(
+                    f"[{ds_pick}][outcome]",
+                    r["outcome"],
+                    "[format]",
+                    fs_pick,
+                    "[final]",
+                    fin_pick,
+                    flush=True,
+                )
+
         for r in row_infos:
             i = r["i"]
             tu = r["traj_uid"]
@@ -233,15 +336,6 @@ class EpisodeRewardManager:
             reward_extra_info["combined_reward_scalar"].append(final_score)
             for k in FORMAT_REWARD_EXTRA_KEYS:
                 reward_extra_info[k].append(float(fmt_metrics[k]))
-
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine and np.random.random() < 0.1:
-                already_print_data_sources[data_source] += 1
-                print(f"[{data_source}][prompt]", prompt_str)
-                print(f"[{data_source}][response]", response_str)
-                print(f"[{data_source}][outcome]", outcome, "[format]", format_score, "[final]", final_score)
 
         if return_dict:
             return {
