@@ -3,8 +3,9 @@
 # Online experience / memory write-back: LLM extracts JSON ``{"memories":[...]}`` per trajectory, then VDB insert.
 # - mode=self: batch prompts to ``actor_rollout_wg.generate_sequences`` (same Reasoning rollout worker).
 # - mode=teacher: OpenAI-compatible ``/v1/chat/completions`` on the driver (no Ray worker).
-# - schema=compact: small models output only ``memory_text`` (+ optional ``source_step``); ``state_text``/``action_text``
-#   are filled from the trajectory (EvolveR-style principles). schema=full matches ``extract_memory_records.py``.
+# - schema=compact: model outputs ``situation`` + ``memory_text`` (+ optional ``source_step``); ``action_text`` may be
+#   filled from the trajectory when missing. Stored ``state_text`` is seeded from ``situation`` (then step / placeholder).
+#   schema=full matches ``extract_memory_records.py``.
 
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from transformers import PreTrainedTokenizer
 
 from agent_system.memory.experience_utility import UTILITY_SCORE_KEY, initial_utility_metadata
 from agent_system.memory.memory_manager import MemoryManager, normalize_text
-from agent_system.memory.types import MemoryRecord
+from agent_system.memory.types import MEMORY_STATE_UNAVAILABLE_PLACEHOLDER, MemoryRecord
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -90,8 +91,8 @@ Trajectory:
 {trajectory_text}
 """
 
-# Fewer fields for weak extractors (small models / self-distill). Model outputs ``memory_text`` (+ optional ``source_step``);
-# ``state_text`` / ``action_text`` are filled from the trajectory when possible (EvolveR-style “Guiding Principle” in one line).
+# Fewer fields for weak extractors (small models / self-distill). Model outputs ``situation`` + ``memory_text`` (+ optional ``source_step``);
+# ``action_text`` can still be filled from the trajectory when missing.
 DEFAULT_COMPACT_JSON_SYSTEM_PROMPT = """You analyze agent trajectories and distill generalizable wisdom (Guiding or Warning Principles).
 Each principle must be useful later: another run in a similar situation should benefit from retrieving it.
 
@@ -99,7 +100,9 @@ Output one JSON object only. No markdown fences, no commentary before or after t
 
 Requirements:
 - Ground every principle in the trajectory; do not invent facts.
-- One clear English sentence per principle (core advice). No bullet lists inside memory_text.
+- For each item output two sentences as two fields:
+  - situation: one short English sentence — the generalized context or preconditions when this advice applies (good as a retrieval key). Not a full observation dump.
+  - memory_text: one clear English sentence — the core advice (what to do or check). No bullet lists inside memory_text.
 - Prefer strategies that explain what to do or check, not a play-by-play recap of this episode.
 - Generalize: do not copy long strings of object disambiguators (e.g. "tomato 4", "cabinet 3") unless one short mention is needed; prefer "the target object", "the goal receptacle", or the object class.
 - Each principle should be one coherent subgoal or check; do not merge unrelated steps into one sentence, and do not output principles that contradict each other for the same object."""
@@ -111,7 +114,11 @@ Each principle must be independently useful if stored in a memory bank and retri
 Return JSON exactly in this shape. ``source_step`` is optional (1-based index of the agent turn the principle is grounded in).
 {{
   "memories": [
-    {{ "memory_text": "one-sentence principle here", "source_step": 1 }}
+    {{
+      "situation": "one-sentence generalized context or preconditions when this applies",
+      "memory_text": "one-sentence principle / what to do or check",
+      "source_step": 1
+    }}
   ]
 }}
 
@@ -119,6 +126,7 @@ Example (different task—format only):
 {{
   "memories": [
     {{
+      "situation": "A file download fails with an HTTP client error.",
       "memory_text": "When a download fails with a 404, verify the URL before retrying instead of repeating the same request.",
       "source_step": 2
     }}
@@ -1044,6 +1052,10 @@ def _memory_record_from_extracted_dict(
 ) -> MemoryRecord | None:
     schema_n = (schema or "full").strip().lower()
     st_raw = memory["state_text"] if "state_text" in memory and memory["state_text"] is not None else ""
+    if schema_n == "compact":
+        sit = memory.get("situation")
+        if sit is not None and str(sit).strip():
+            st_raw = sit
     at_raw = memory["action_text"] if "action_text" in memory and memory["action_text"] is not None else ""
     mt_raw = memory["memory_text"] if "memory_text" in memory and memory["memory_text"] is not None else ""
     memory_text = normalize_text(str(mt_raw), max_chars=max_memory_chars)
@@ -1075,7 +1087,9 @@ def _memory_record_from_extracted_dict(
                         _action_text_from_step(step_one, tokenizer), max_chars=max_action_chars
                     )
         if not state_text:
-            state_text = normalize_text(memory_text, max_chars=max_state_chars)
+            state_text = normalize_text(
+                MEMORY_STATE_UNAVAILABLE_PLACEHOLDER, max_chars=max_state_chars
+            )
         if not action_text:
             action_text = normalize_text(memory_text, max_chars=max_action_chars)
     else:

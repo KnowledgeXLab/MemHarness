@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+# Compact-schema write-back: when ``state_text`` cannot be taken from the trajectory step, store this
+# instead of copying ``memory_text`` (keeps retrieval keys honest when ``retrieve_key=state_text``).
+# Also used in ``MemoryManager._format_memory_prompt`` when displaying an empty ``state_text``.
+MEMORY_STATE_UNAVAILABLE_PLACEHOLDER = "(Historical situation not recorded for this memory.)"
+
 
 @dataclass
 class MemoryRecord:

@@ -292,14 +292,32 @@ def extract_labels_for_summary(raw: dict[str, Any] | None) -> list[str]:
 
 
 def normalize_memory_text_key(text: str) -> str:
-    """Match keys between injected ``memory k:`` lines and JSONL ``memory_text``."""
+    """Match keys between injected principle text and JSONL ``memory_text``."""
     return " ".join((text or "").strip().split())
 
 
 def parse_injected_memory_lines(input_text: str) -> list[tuple[int, str]]:
-    """Parse ``memory_manager._format_memory_prompt`` lines: ``memory 1: ...`` (top_k typically 3)."""
+    """Parse ``memory_manager._format_memory_prompt``: ``--- Memory k ---`` blocks with ``Principle:``; else legacy ``memory k:``."""
+    text = input_text or ""
+    markers = list(re.finditer(r"(?m)^--- Memory (\d+) ---\s*$", text))
     out: list[tuple[int, str]] = []
-    for m in _MEMORY_LINE_RE.finditer(input_text or ""):
+    for i, mk in enumerate(markers):
+        try:
+            rank = int(mk.group(1))
+        except ValueError:
+            continue
+        start = mk.end()
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+        block = text[start:end]
+        pm = re.search(r"(?m)^Principle:\s*(.*)$", block)
+        if pm:
+            snippet = (pm.group(1) or "").strip()
+            if snippet:
+                out.append((rank, snippet))
+    if out:
+        out.sort(key=lambda x: x[0])
+        return out
+    for m in _MEMORY_LINE_RE.finditer(text):
         try:
             rank = int(m.group(1))
         except ValueError:
@@ -432,7 +450,7 @@ def build_memory_authoring_context_from_injections(
 
     if not ordered_keys:
         return (
-            "(No ``memory 1:`` / ``memory 2:`` … lines were found in any INPUT; nothing to match.)\n",
+            "(No ``Principle:`` lines under ``--- Memory k ---`` blocks (or legacy ``memory k:`` lines) were found in any INPUT; nothing to match.)\n",
             dbg,
         )
 

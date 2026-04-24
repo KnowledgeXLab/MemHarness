@@ -15,7 +15,7 @@ from .experience_utility import (
 )
 from .global_step_schedule import match_phase_for_global_step
 from .memory_store import MemoryStoreDispatcher
-from .types import MemoryEvent, RetrievedMemory
+from .types import MEMORY_STATE_UNAVAILABLE_PLACEHOLDER, MemoryEvent, RetrievedMemory
 
 
 # Aligns with ``env.memory.empty_retrieval_message`` default in ``verl/trainer/config/ppo_trainer.yaml``.
@@ -486,17 +486,38 @@ class MemoryManager:
         if self.store is not None:
             self.store.close()
 
-    def _format_memory_prompt(self, retrieved: list[RetrievedMemory], append_score=False, append_action=False, append_value=False, append_state=False) -> str:
-        header = self.config.prompt_header
-        lines = [header]
+    def _format_memory_prompt(
+        self,
+        retrieved: list[RetrievedMemory],
+        append_score=False,
+        append_action=False,
+        append_value=False,
+        append_state=True,
+    ) -> str:
+        """Format retrieved memories for injection into the observation.
+
+        Each hit is one block: ``--- Memory k ---`` then labeled lines (Situation / Principle / …).
+        ``scripts/mem_fail_judge.parse_injected_memory_lines`` parses ``Principle:`` lines per block.
+        """
+        raw_header = self.config.get("prompt_header")
+        header = str(raw_header).strip() if raw_header is not None else ""
+        lines: list[str] = []
+        if header:
+            lines.append(header)
         for index, memory in enumerate(retrieved, start=1):
-            lines.append(f"memory {index}: {memory.memory_text}")
-            if append_score:
-                lines.append(f"   score: {memory.score:.3f}")
-            if append_action:
-                lines.append(f"   useful_action: {memory.action_text}")
-            if append_value:
-                lines.append(f"   memory_value: {memory.value:.3f}")
+            if lines:
+                lines.append("")
+            lines.append(f"--- Memory {index} ---")
             if append_state:
-                lines.append(f"   similar_state: {memory.state_text}")
+                st = (memory.state_text or "").strip()
+                if not st:
+                    st = MEMORY_STATE_UNAVAILABLE_PLACEHOLDER
+                lines.append(f"Situation: {st}")
+            lines.append(f"Principle: {memory.memory_text}")
+            if append_action and (memory.action_text or "").strip():
+                lines.append(f"Recorded action: {memory.action_text}")
+            if append_score:
+                lines.append(f"Retrieval score: {memory.score:.3f}")
+            if append_value and memory.value is not None:
+                lines.append(f"Memory value: {float(memory.value):.3f}")
         return "\n".join(lines)
