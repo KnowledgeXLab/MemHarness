@@ -54,22 +54,6 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 # MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 MEMORY_REBUILD_SOURCE_PATH=""
 
-# --- reward_model.format_reward：与 projection 对齐的 think / action / memory_retrieve shaping ---
-# 见 verl/trainer/config/ppo_trainer.yaml ``reward_model.format_reward``；此处用 Hydra 覆盖。
-FORMAT_REWARD_ENABLE=True
-FORMAT_WEIGHT_OUTCOME=1.0
-FORMAT_WEIGHT_FORMAT=0.1
-# agentic 检索时建议 True，要求响应里出现成对 memory 检索标签（与 env.memory.retrieval_query_* 一致）。
-FORMAT_REQUIRE_MEMORY_RETRIEVE=True
-
-# --- env.memory.experience_utility：EvolveR 式 c_use/c_succ + Laplace 写回 value，可选剪枝 ---
-# prune_every_n_global_steps=0 表示不剪枝；设为正整数则每 N 个 trainer step 剪一次低分记忆。
-EXPERIENCE_UTILITY_ENABLE=True
-EXPERIENCE_UTILITY_UPDATE_ON_RETRIEVAL=True
-EXPERIENCE_UTILITY_UPDATE_ON_EPISODE_END=True
-EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
-EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
-EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
 EXPERIMENT_NAME="train_evolver-1.5B"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
@@ -162,11 +146,11 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
 fi
 
 FORMAT_REWARD_CLI=(
-  reward_model.format_reward.enable="${FORMAT_REWARD_ENABLE}"
-  reward_model.format_reward.weight_outcome="${FORMAT_WEIGHT_OUTCOME}"
-  reward_model.format_reward.weight_format="${FORMAT_WEIGHT_FORMAT}"
-  reward_model.format_reward.require_memory_retrieve="${FORMAT_REQUIRE_MEMORY_RETRIEVE}"
-  reward_model.format_reward.format_warmup_global_steps=30
+  reward_model.format_reward.enable=True
+  reward_model.format_reward.weight_outcome=1.0
+  reward_model.format_reward.weight_format=0.1
+  reward_model.format_reward.require_memory_retrieve=True
+  reward_model.format_reward.format_warmup_global_steps=50
   reward_model.format_reward.warmup_weight_format_multiplier=0.0
   reward_model.format_reward.warmup_require_memory_retrieve=False
   reward_model.format_reward.warmup_penalize_chinese_chars=True
@@ -175,12 +159,10 @@ FORMAT_REWARD_CLI=(
 EXPERIENCE_UTILITY_CLI=()
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIENCE_UTILITY_CLI=(
-    env.memory.experience_utility.enable="${EXPERIENCE_UTILITY_ENABLE}"
-    env.memory.experience_utility.update_on_retrieval="${EXPERIENCE_UTILITY_UPDATE_ON_RETRIEVAL}"
-    env.memory.experience_utility.update_on_episode_end="${EXPERIENCE_UTILITY_UPDATE_ON_EPISODE_END}"
-    env.memory.experience_utility.prune_every_n_global_steps="${EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS}"
-    env.memory.experience_utility.prune_score_threshold="${EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD}"
-    env.memory.experience_utility.min_uses_before_prune="${EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE}"
+    env.memory.experience_utility.enable=True
+    env.memory.experience_utility.prune_every_n_global_steps=20
+    env.memory.experience_utility.prune_score_threshold=0.3
+    env.memory.experience_utility.min_uses_before_prune=3
   )
 else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)

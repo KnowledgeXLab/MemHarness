@@ -377,7 +377,7 @@ env:
     # When true, log trainer_global_step, resolved retrieval_mode, and a short retrieve query preview
     # on each MemoryManager.retrieve (can be noisy).
     debug_retrieval: false
-    # Injected when a retrieval query runs but the vector store returns no hits (aligns with mem_adaptor.no_experience_message).
+    # Injected when a retrieval query runs but the vector store returns no hits.
     empty_retrieval_message: "(No validated memory principle applies; rely on observation and reasoning.)"
     # Log memory.timing lines for retrieve rollups, summarization, VDB insert, utility updates, clear/prune.
     log_operation_timing: true
@@ -434,8 +434,6 @@ env:
     # EvolveR-style utility: Laplace score (c_succ+1)/(c_use+2) in metadata + optional prune/clear.
     experience_utility:
       enable: true
-      update_on_retrieval: true   # Increment utility_use_count when a memory is retrieved and injected.
-      update_on_episode_end: true # On trajectory success, increment utility_succ_count for memories seen in infos.
       prune_every_n_global_steps: 0   # 0 = disabled; e.g. 500 to prune low-score memories every N trainer steps.
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
@@ -573,8 +571,6 @@ mem_adaptor:
   empty_output_markers:
     - "<EMPTY>"
     - "<empty>"
-  # On adaptor <EMPTY>, the <memory>...</memory> block is removed, then this string is appended to the observation text.
-  no_experience_message: "(No validated memory principle applies; rely on observation and reasoning.)"
   # One adaptor forward per retrieved hit; non-<EMPTY> outputs are merged with multi_hit_joiner. {index} is 1-based among accepted outputs only.
   adapted_principle_label_template: "Adapted memory principle {index}:\n"
   # Legacy: used only if adapted_principle_label_template is null or whitespace.

@@ -18,7 +18,7 @@ from .memory_store import MemoryStoreDispatcher
 from .types import MemoryEvent, RetrievedMemory
 
 
-# Aligns with ``mem_adaptor.no_experience_message`` default in ``verl/trainer/config/ppo_trainer.yaml``.
+# Aligns with ``env.memory.empty_retrieval_message`` default in ``verl/trainer/config/ppo_trainer.yaml``.
 _DEFAULT_EMPTY_RETRIEVAL_MESSAGE = (
     "(No validated memory principle applies; rely on observation and reasoning.)"
 )
@@ -240,9 +240,6 @@ class MemoryManager:
     def _apply_retrieval_utility_updates(self, retrieved: list[RetrievedMemory]) -> None:
         if not self.experience_utility_enabled() or self.store is None:
             return
-        cfg = self._experience_utility_cfg()
-        if not cfg.get("update_on_retrieval", True):
-            return
         seen: set[str] = set()
         updates: list[dict] = []
         for memory in retrieved:
@@ -272,9 +269,6 @@ class MemoryManager:
         trainer_global_step: int | None,
     ) -> None:
         if not self.experience_utility_enabled() or self.store is None:
-            return
-        cfg = self._experience_utility_cfg()
-        if not cfg.get("update_on_episode_end", True):
             return
         if not total_infos or not success:
             return

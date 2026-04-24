@@ -41,10 +41,7 @@ MEMORY_BASELINE_CLI=(
   env.memory.rebuild_source_path=null
   env.memory.debug_retrieval=false
   env.memory.experience_utility.enable=false
-  env.memory.experience_utility.update_on_retrieval=false
-  env.memory.experience_utility.update_on_episode_end=false
   env.memory.experience_utility.prune_every_n_global_steps=0
-  env.memory.experience_utility.clear_every_n_global_steps=0
 )
 
 # --- 基线：关闭 format_reward（yaml 默认 enable=true，必须显式关）---

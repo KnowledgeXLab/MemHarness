@@ -246,7 +246,7 @@ def build_adaptor_dataproto(
     return DataProto.from_single_dict(data=data, meta_info=meta)
 
 
-def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> Tuple[str, bool]:
+def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig, no_exp: str) -> Tuple[str, bool]:
     """Build merged replacement string and whether every hit is a reject (<EMPTY>).
 
     When ``adapted_principle_label_template`` is set (non-empty), each accepted output becomes
@@ -254,7 +254,6 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig) -> T
     Otherwise falls back to a single ``adapted_injection_prefix`` before joined bodies (legacy).
     """
     markers = list(ma["empty_output_markers"])
-    no_exp = str(ma["no_experience_message"]).strip()
     joiner = str(ma["multi_hit_joiner"])
     label_tmpl_raw = ma.get("adapted_principle_label_template")
 
@@ -337,7 +336,7 @@ def _patch_one_obs_text(
     raw_outputs: Sequence[str],
     all_reject: bool,
 ) -> None:
-    """Replace the last ``<memory>...</memory>`` inner with adaptor output; on <EMPTY> remove the block and append ``replacement`` (``no_experience_message``)."""
+    """Replace the last ``<memory>...</memory>`` inner with adaptor output; on <EMPTY> remove the block and append ``replacement`` (``empty_retrieval_message``)."""
 
     infos[i]["mem_adaptor_raw_outputs"] = list(raw_outputs)
     infos[i]["mem_adaptor_raw_output"] = raw_outputs[0]
@@ -381,11 +380,12 @@ def apply_adaptor_to_obs_texts(
     indices: List[int],
     adaptor_texts: List[str],
     ma: DictConfig,
+    empty_retrieval_message: str,
 ) -> None:
     """In-place patch ``texts[i]`` after retrieval block; set ``infos[i]`` adaptor fields."""
     for row_k, i in enumerate(indices):
         raw = adaptor_texts[row_k]
-        rep, reject = _replacement_from_many_raws([raw], ma)
+        rep, reject = _replacement_from_many_raws([raw], ma, empty_retrieval_message)
         _patch_one_obs_text(texts=texts, i=i, infos=infos, replacement=rep, raw_outputs=[raw], all_reject=reject)
 
 
@@ -537,12 +537,13 @@ def maybe_apply_memory_adaptor(
                 rec["rollout_log_probs"] = out.batch["rollout_log_probs"][k].detach().cpu().clone()
             adaptor_training_buffer.append(rec)
 
+    empty_retrieval_message = str(config.env.memory.empty_retrieval_message)
     grouped: Dict[int, List[str]] = defaultdict(list)
     for env_i, line in zip(row_env_indices, dec):
         grouped[env_i].append(line)
     for env_i in sorted(grouped.keys()):
         raws = grouped[env_i]
-        rep, reject = _replacement_from_many_raws(raws, ma)
+        rep, reject = _replacement_from_many_raws(raws, ma, empty_retrieval_message)
         _patch_one_obs_text(
             texts=texts,
             i=env_i,
