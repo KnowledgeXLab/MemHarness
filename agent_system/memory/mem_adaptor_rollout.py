@@ -270,6 +270,8 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig, no_e
         rep = no_exp if no_exp else ""
         return rep, True
 
+    header = str(ma.get("adapted_prompt_header", "") or "").strip()
+
     if label_tmpl_raw is not None and str(label_tmpl_raw).strip():
         tmpl = str(label_tmpl_raw)
         blocks: List[str] = []
@@ -277,6 +279,8 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig, no_e
             lab = tmpl.replace("{index}", str(idx + 1))
             blocks.append(f"{lab}{part.strip()}")
         rep = joiner.join(blocks)
+        if header:
+            rep = f"{header}\n\n{rep}"
         return rep, False
 
     prefix = str(ma.get("adapted_injection_prefix", "") or "")
@@ -287,6 +291,8 @@ def _replacement_from_many_raws(raw_outputs: Sequence[str], ma: DictConfig, no_e
         rep = prefix.rstrip()
     else:
         rep = body
+    if header and rep:
+        rep = f"{header}\n\n{rep}"
     return rep, False
 
 

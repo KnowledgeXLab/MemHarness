@@ -17,7 +17,7 @@ Metrics related to the PPO trainer.
 
 from collections import defaultdict
 from functools import partial
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -87,6 +87,91 @@ def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
             out[f"reward/{short}/min"] = float(np.min(arr_m))
             out[f"reward/{short}/max"] = float(np.max(arr_m))
     return out
+
+
+def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any]) -> Dict[str, Any]:
+    """MemAdaptor diagnostics from ``write_mem_adaptor_step_non_tensor_batch`` (actor rollout / inference).
+
+    Per-step booleans vary within a trajectory, so per-trajectory stats aggregate the mean rate over
+    all env-step rows for each ``traj_uid`` (unlike ``memory_retrieval_counts``, which is constant per traj).
+    """
+    out: Dict[str, Any] = {}
+    if "mem_adaptor_applied" not in ntb or "traj_uid" not in ntb:
+        return out
+    tu = np.asarray(ntb["traj_uid"]).reshape(-1)
+    applied = np.asarray(ntb["mem_adaptor_applied"]).reshape(-1)
+    n = int(min(tu.size, applied.size))
+    if n <= 0:
+        return out
+    tu = tu[:n]
+    applied_f = applied[:n].astype(np.float64, copy=False)
+    out["mem_adaptor/applied_mean_per_step"] = float(np.mean(applied_f))
+
+    rej_f: Optional[np.ndarray] = None
+    if "mem_adaptor_reject" in ntb:
+        rej = np.asarray(ntb["mem_adaptor_reject"]).reshape(-1)
+        if rej.size >= n:
+            rej_f = rej[:n].astype(np.float64, copy=False)
+            out["mem_adaptor/reject_mean_per_step"] = float(np.mean(rej_f))
+
+    _, inv = np.unique(tu, return_inverse=True)
+    K = int(inv.max()) + 1 if inv.size else 0
+    if K <= 0:
+        return out
+    cnts = np.bincount(inv, minlength=K).astype(np.float64)
+    safe = np.maximum(cnts, 1.0)
+    sums_a = np.bincount(inv, weights=applied_f, minlength=K)
+    per_traj_a = sums_a / safe
+    out["mem_adaptor/applied_mean_per_traj"] = float(np.mean(per_traj_a))
+    out["mem_adaptor/applied_min_per_traj"] = float(np.min(per_traj_a))
+    out["mem_adaptor/applied_max_per_traj"] = float(np.max(per_traj_a))
+
+    if rej_f is not None:
+        sums_r = np.bincount(inv, weights=rej_f, minlength=K)
+        per_traj_r = sums_r / safe
+        out["mem_adaptor/reject_mean_per_traj"] = float(np.mean(per_traj_r))
+        out["mem_adaptor/reject_min_per_traj"] = float(np.min(per_traj_r))
+        out["mem_adaptor/reject_max_per_traj"] = float(np.max(per_traj_r))
+
+    if "traj_episode_success" in ntb:
+        succ = np.asarray(ntb["traj_episode_success"], dtype=np.float64).reshape(-1)
+        if succ.size >= n:
+            succ_f = succ[:n]
+            first_success = np.zeros(K, dtype=np.float64)
+            seen_success = np.zeros(K, dtype=bool)
+            for row_i, traj_i in enumerate(inv):
+                if not seen_success[traj_i]:
+                    first_success[traj_i] = succ_f[row_i]
+                    seen_success[traj_i] = True
+
+            applied_traj = sums_a > 0.0
+            out["mem_adaptor/applied_traj_count"] = float(np.sum(applied_traj))
+            if np.any(applied_traj):
+                applied_success = float(np.mean(first_success[applied_traj]))
+                out["mem_adaptor/success_rate_when_applied"] = applied_success
+                out["mem_adaptor/failure_rate_when_applied"] = 1.0 - applied_success
+
+            if rej_f is not None:
+                rejected_traj = sums_r > 0.0
+                out["mem_adaptor/rejected_traj_count"] = float(np.sum(rejected_traj))
+                if np.any(rejected_traj):
+                    rejected_success = float(np.mean(first_success[rejected_traj]))
+                    out["mem_adaptor/success_rate_when_rejected"] = rejected_success
+                    out["mem_adaptor/failure_rate_when_rejected"] = 1.0 - rejected_success
+
+                accepted_step_f = np.maximum(applied_f - rej_f, 0.0)
+                accepted_traj = np.bincount(inv, weights=accepted_step_f, minlength=K) > 0.0
+                out["mem_adaptor/accepted_traj_count"] = float(np.sum(accepted_traj))
+                if np.any(accepted_traj):
+                    accepted_success = float(np.mean(first_success[accepted_traj]))
+                    out["mem_adaptor/success_rate_when_accepted"] = accepted_success
+                    out["mem_adaptor/failure_rate_when_accepted"] = 1.0 - accepted_success
+
+    return out
+
+
+def _mem_adaptor_rollout_metrics(batch: DataProto) -> Dict[str, Any]:
+    return compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(batch.non_tensor_batch)
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
@@ -168,6 +253,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
               retrieval counts (injection + memory_query steps; see rollout_loop).
             - memory/retrieve_* , memory/vdb_row_count, etc.: from ``batch.meta_info["memory_rollout_metrics"]``
               (VDB timing, row count, write-back); logged in the same step as training metrics.
+            - mem_adaptor/applied_* , mem_adaptor/reject_* and conditional success/failure rates: from
+              ``batch.non_tensor_batch`` when MemAdaptor writes step diagnostics (inference rollout;
+              independent of ``train_memory_adaptor``).
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -280,6 +368,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                 metrics[_mk] = float(_mv)
             except (TypeError, ValueError):
                 pass
+    metrics.update(_mem_adaptor_rollout_metrics(batch))
     return metrics
 
 

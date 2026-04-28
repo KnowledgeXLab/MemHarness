@@ -438,7 +438,7 @@ env:
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
       clear_every_n_global_steps: 0  # 0 = disabled; if >0, drops and recreates empty collection every N steps (runs before prune).
-    count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
+    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
     server_advertised_host: null   # Host advertised to workers; auto-detected when null.
@@ -572,6 +572,7 @@ mem_adaptor:
     - "<EMPTY>"
     - "<empty>"
   # One adaptor forward per retrieved hit; non-<EMPTY> outputs are merged with multi_hit_joiner. {index} is 1-based among accepted outputs only.
+  adapted_prompt_header: "Relevant adapted past memories are provided below. Reuse them only if you think they are useful."
   adapted_principle_label_template: "Adapted memory principle {index}:\n"
   # Legacy: used only if adapted_principle_label_template is null or whitespace.
   adapted_injection_prefix: "Adapted memory principle:\n"

@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# EvolveR 式「在线交互」阶段（本仓库实现）：在 **带记忆检索/写回** 的 AlfWorld 上，
-# 用 GRPO **只训练主 Reasoning policy**（actor_rollout_ref），不训练 MemAdaptor。
-# 本脚本显式打开：① reward_model.format_reward（think/action/memory_retrieve shaping）
-# ② env.memory.experience_utility（c_use/c_succ Laplace 写回 + 可选剪枝）。
-# 需本地 vLLM rollout（不可使用 openai_api 作为主 policy——无法正确反传 / logprob）。
-# 论文框架见 https://arxiv.org/abs/2510.16079
 set -x
 set -euo pipefail
 export RAY_ADDRESS='http://10.140.37.91:8265'
@@ -15,8 +9,19 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
+# 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
+MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+
+# --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
+MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
+
+# global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数
 trainer_n_gpus_per_node=8
 GPU_NUM="${trainer_n_gpus_per_node}"
+# MemAdaptor GPU：仅当 mem_adaptor.use_actor_rollout_wg=false 时，main_ppo 才会注册 mem_adaptor_pool 并占用
+# mem_adaptor.resource_pool_gpus_per_node（见 verl/trainer/main_ppo.py::_mem_adaptor_dedicated_rollout_wg）。
+# use_actor_rollout_wg=true 时 Adaptor 前向与主 policy 共用同一 Actor/vLLM（不建独立池），勿再设专用卡数。
+# 若要 GRPO 训练 Adaptor：须 use_actor_rollout_wg=false + train_memory_adaptor=true + 下面专用池（示例见 train_alfworld-adaptor-local.sh）。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -48,7 +53,8 @@ EMBEDDING_API_KEY=""
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
+# 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
+MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-140,SH-IDC1-10-140-37-8'
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -56,15 +62,13 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 # MEMORY_REBUILD_SOURCE_PATH="data/MemAdaptor/AgentTraj-L/${TASK_NAME}_train_memory_records-gpt-5.1.jsonl"
 MEMORY_REBUILD_SOURCE_PATH=""
 
-
 EXPERIENCE_UTILITY_ENABLE=True
 EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-3B-2"
+EXPERIMENT_NAME="train_adaptor-same-7B-2"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
-MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
@@ -80,9 +84,10 @@ TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_evolver-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
+echo "[log] MODEL_PATH (Reasoning + MemAdaptor)=${MODEL_PATH}"
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
@@ -132,6 +137,23 @@ export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/pyt
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
 RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH']}}))")"
 
+# Slurm --exclude 逗号分隔多节点。Hydra 对 ``a,b`` 会报 Ambiguous；用列表语法 ``['a','b']``（见 remote_slurm_launcher 对 list 的 join）
+mem_exclude_to_hydra_list() {
+  local s="${1:-}" IFS=,
+  read -r -a _ex_parts <<< "$s" || true
+  local out="[" first=1
+  for n in "${_ex_parts[@]}"; do
+    n="${n#"${n%%[![:space:]]*}"}"
+    n="${n%"${n##*[![:space:]]}"}"
+    [ -z "$n" ] && continue
+    if [ "$first" -eq 0 ]; then out+=","; fi
+    out+="'${n//\'/\\\'}'"
+    first=0
+  done
+  out+=']'
+  printf '%s' "$out"
+}
+
 REMOTE_VDB_CLI=()
 MEMORY_REMOTE_SLURM_LC="$(printf '%s' "${MEMORY_REMOTE_SLURM:-false}" | tr '[:upper:]' '[:lower:]')"
 if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "1" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "yes" ]; then
@@ -148,7 +170,8 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
     REMOTE_VDB_CLI+=(env.memory.remote_slurm_launch.apptainer_sif="${MEMORY_APPTAINER_SIF}")
   fi
   if [ -n "${MEMORY_REMOTE_EXCLUDE_NODES}" ]; then
-    REMOTE_VDB_CLI+=(env.memory.remote_slurm_launch.exclude_nodes="${MEMORY_REMOTE_EXCLUDE_NODES}")
+    _ex_hy="$(mem_exclude_to_hydra_list "${MEMORY_REMOTE_EXCLUDE_NODES}")"
+    REMOTE_VDB_CLI+=("env.memory.remote_slurm_launch.exclude_nodes=${_ex_hy}")
   fi
 fi
 
@@ -157,7 +180,7 @@ FORMAT_REWARD_CLI=(
   reward_model.format_reward.weight_outcome=1.0
   reward_model.format_reward.weight_format=0.1
   reward_model.format_reward.require_memory_retrieve=True
-  reward_model.format_reward.format_warmup_global_steps=50
+  reward_model.format_reward.format_warmup_global_steps=0
   reward_model.format_reward.warmup_weight_format_multiplier=0.0
   reward_model.format_reward.warmup_require_memory_retrieve=False
   reward_model.format_reward.warmup_penalize_chinese_chars=False
@@ -175,6 +198,14 @@ else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)
 fi
 
+MEM_ADAPTOR_PHASES_CLI=()
+if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
+  MEM_ADAPTOR_PHASES_CLI+=(
+    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
+    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
+  )
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -188,7 +219,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.truncation='error' \
       data.return_raw_chat=True \
       actor_rollout_ref.model.path="${MODEL_PATH}" \
-      actor_rollout_ref.actor.trainable=true \
+      actor_rollout_ref.actor.trainable=True \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.model.use_remove_padding=True \
       actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -214,8 +245,10 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=false \
+      mem_adaptor.enable=true \
+      mem_adaptor.use_actor_rollout_wg=true \
       mem_adaptor.train_memory_adaptor=false \
+      mem_adaptor.model.path="${MODEL_PATH}" \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \
@@ -228,6 +261,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
+      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \

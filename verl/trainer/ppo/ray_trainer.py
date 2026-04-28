@@ -48,6 +48,7 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
+    compute_mem_adaptor_rollout_metrics_from_non_tensor_batch,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -910,6 +911,7 @@ class RayPPOTrainer:
         traj_uid_list = []
         episode_length_list = []
         memory_retrieval_list = []
+        val_mem_adaptor_non_tensor = defaultdict(list)
         success_rate_dict = {}
         success_meta_rows = []
 
@@ -1025,6 +1027,14 @@ class RayPPOTrainer:
                 episode_length_list.append(test_output_gen_batch.non_tensor_batch['episode_lengths'])
             if 'memory_retrieval_counts' in test_output_gen_batch.non_tensor_batch:
                 memory_retrieval_list.append(test_output_gen_batch.non_tensor_batch['memory_retrieval_counts'])
+            for key in (
+                "traj_uid",
+                "mem_adaptor_applied",
+                "mem_adaptor_reject",
+                "traj_episode_success",
+            ):
+                if key in test_output_gen_batch.non_tensor_batch:
+                    val_mem_adaptor_non_tensor[key].append(np.asarray(test_output_gen_batch.non_tensor_batch[key]).reshape(-1))
             n_rows = len(test_batch)
             for j in range(n_rows):
                 row_m = {}
@@ -1157,6 +1167,14 @@ class RayPPOTrainer:
         if unique_memory_retrieval is not None and unique_memory_retrieval.size > 0:
             metric_dict['val/memory_retrieval_count/mean'] = float(np.mean(unique_memory_retrieval))
             metric_dict['val/memory_retrieval_count/max'] = float(np.max(unique_memory_retrieval))
+
+        val_mem_adaptor_ntb = {
+            key: np.concatenate(values, axis=0)
+            for key, values in val_mem_adaptor_non_tensor.items()
+            if values
+        }
+        for key, value in compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(val_mem_adaptor_ntb).items():
+            metric_dict[f"val/{key}"] = value
 
         for k, v in success_rate.items():
             metric_dict[f'val/{k}'] = v

@@ -40,13 +40,15 @@ EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 检索）
 RETRIEVE_KEY="memory_text"
-EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
-EMBEDDING_API_KEY="DataFrontier_bge_m3"
+# EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
+# EMBEDDING_API_KEY="DataFrontier_bge_m3"
+EMBEDDING_API_URL="http://10.140.37.140:8081/v1"
+EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-11"
+MEMORY_REMOTE_EXCLUDE_NODES="SH-IDC1-10-140-37-8"
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -55,7 +57,7 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 MEMORY_REBUILD_SOURCE_PATH=""
 
 
-EXPERIMENT_NAME="train_evolver-1.5B"
+EXPERIMENT_NAME="train_evolver-1.5B-2"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 MODEL_PATH="models/public_models/Qwen2.5-1.5B-Instruct"
 
@@ -153,7 +155,7 @@ FORMAT_REWARD_CLI=(
   reward_model.format_reward.format_warmup_global_steps=50
   reward_model.format_reward.warmup_weight_format_multiplier=0.0
   reward_model.format_reward.warmup_require_memory_retrieve=False
-  reward_model.format_reward.warmup_penalize_chinese_chars=True
+  reward_model.format_reward.warmup_penalize_chinese_chars=False
 )
 
 EXPERIENCE_UTILITY_CLI=()

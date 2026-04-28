@@ -515,17 +515,6 @@ class TrajectoryCollector:
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
-            
-            # Update episode lengths for active environments
-            batch_list: list[dict] = to_list_of_dict(batch)
-
-            for i in range(batch_size):
-                total_batch_list[i].append(batch_list[i])
-                total_infos[i].append(infos[i])
-
-            # Update done states
-            is_done = np.logical_or(is_done, dones)
-            is_done = np.logical_or(is_done, episode_lengths >= max_env_steps)
 
             adaptor_train_buf = None
             if (
@@ -549,6 +538,17 @@ class TrajectoryCollector:
                 grpo_group_uid=uid_batch,
             )
             write_mem_adaptor_step_non_tensor_batch(batch, infos, batch_size)
+
+            # Update episode lengths for active environments
+            batch_list: list[dict] = to_list_of_dict(batch)
+
+            for i in range(batch_size):
+                total_batch_list[i].append(batch_list[i])
+                total_infos[i].append(infos[i])
+
+            # Update done states
+            is_done = np.logical_or(is_done, dones)
+            is_done = np.logical_or(is_done, episode_lengths >= max_env_steps)
 
             # Update observations for next step
             obs = next_obs

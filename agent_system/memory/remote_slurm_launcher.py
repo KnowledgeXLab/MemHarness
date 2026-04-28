@@ -51,7 +51,11 @@ def start_memory_vdb_on_slurm_node(
     cpus = int(rl.get("cpus_per_task") or 4)
     mem = str(rl.get("mem") or "32G")
     account = rl.get("account")
-    exclude_nodes = str(rl.get("exclude_nodes") or "").strip()
+    ex_raw = rl.get("exclude_nodes")
+    if isinstance(ex_raw, (list, tuple)):
+        exclude_nodes = ",".join(str(x).strip() for x in ex_raw if str(x).strip())
+    else:
+        exclude_nodes = str(ex_raw or "").strip()
     gres = rl.get("gres")
     apptainer_sif = str(rl.get("apptainer_sif") or "").strip()
     apptainer_binds = str(rl.get("apptainer_binds") or "/mnt:/mnt").strip()
