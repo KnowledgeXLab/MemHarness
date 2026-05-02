@@ -1158,15 +1158,13 @@ class RayPPOTrainer:
             metric_dict[f'val/{data_source}/episode_length/max'] = np.max(lengths)
 
         for data_source, counts in data_source_memory_retrieval.items():
-            metric_dict[f'val/{data_source}/memory_retrieval_count/mean'] = np.mean(counts)
-            metric_dict[f'val/{data_source}/memory_retrieval_count/max'] = np.max(counts)
+            metric_dict[f'val/{data_source}/memory/retrieval_count_per_traj_mean'] = np.mean(counts)
 
         if unique_episode_lengths is not None and unique_episode_lengths.size > 0:
             metric_dict['val/episode_length/mean'] = float(np.mean(unique_episode_lengths))
             metric_dict['val/episode_length/max'] = float(np.max(unique_episode_lengths))
         if unique_memory_retrieval is not None and unique_memory_retrieval.size > 0:
-            metric_dict['val/memory_retrieval_count/mean'] = float(np.mean(unique_memory_retrieval))
-            metric_dict['val/memory_retrieval_count/max'] = float(np.max(unique_memory_retrieval))
+            metric_dict['val/memory/retrieval_count_per_traj_mean'] = float(np.mean(unique_memory_retrieval))
 
         val_mem_adaptor_ntb = {
             key: np.concatenate(values, axis=0)

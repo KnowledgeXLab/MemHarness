@@ -10,7 +10,8 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
-MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+# MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-3b-cold-start-20260430/global_step_125'
 
 # --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
@@ -54,7 +55,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
-MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-140,SH-IDC1-10-140-37-8'
+MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-140,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-23'
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -67,7 +68,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-7B-2"
+EXPERIMENT_NAME="train_adaptor-same-3B-cold_start_20260430_epoch1"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then

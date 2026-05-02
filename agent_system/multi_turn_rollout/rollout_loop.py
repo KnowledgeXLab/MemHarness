@@ -523,6 +523,13 @@ class TrajectoryCollector:
             ):
                 adaptor_train_buf = self.mem_adaptor_training_samples
 
+            adaptor_episode_lengths = episode_lengths
+            if np.any(memory_query_mask) and not count_query_as_step:
+                adaptor_episode_lengths = episode_lengths.copy()
+                # Memory-query turns do not advance the environment, so episode_lengths is still
+                # the number of completed env actions. Gate adaptor by the current decision step.
+                adaptor_episode_lengths[np.logical_and(active_masks, memory_query_mask)] += 1
+
             maybe_apply_memory_adaptor(
                 config=self.config,
                 tokenizer=self.adaptor_tokenizer,
@@ -532,7 +539,7 @@ class TrajectoryCollector:
                 generate_wg=actor_rollout_wg,
                 adaptor_rollout_wg=adaptor_rollout_wg,
                 trainer_global_step=trainer_global_step,
-                episode_lengths=episode_lengths,
+                episode_lengths=adaptor_episode_lengths,
                 adaptor_training_buffer=adaptor_train_buf,
                 traj_uid=traj_uid,
                 grpo_group_uid=uid_batch,

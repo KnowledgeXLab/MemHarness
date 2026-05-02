@@ -57,7 +57,7 @@ def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
 
     EpisodeRewardManager repeats the same trajectory-level scalars on every env-step row; we aggregate
     with one value per ``traj_uid`` so means match per-trajectory averages (e.g. align with
-    ``memory/retrieval_count_mean_per_traj``).
+    ``memory/retrieval_count_per_traj_mean``).
     """
     out: Dict[str, Any] = {}
     ntb = batch.non_tensor_batch
@@ -92,8 +92,11 @@ def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
 def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any]) -> Dict[str, Any]:
     """MemAdaptor diagnostics from ``write_mem_adaptor_step_non_tensor_batch`` (actor rollout / inference).
 
-    Per-step booleans vary within a trajectory, so per-trajectory stats aggregate the mean rate over
-    all env-step rows for each ``traj_uid`` (unlike ``memory_retrieval_counts``, which is constant per traj).
+    Report trajectory-level counts, not per-step rates:
+
+    - ``*_count_per_traj_mean``: average number of rows per trajectory where the event happened.
+    - ``*_traj_count``: number of trajectories where the event happened at least once.
+    - conditional success rates are trajectory-level: each trajectory contributes once.
     """
     out: Dict[str, Any] = {}
     if "mem_adaptor_applied" not in ntb or "traj_uid" not in ntb:
@@ -105,33 +108,35 @@ def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any
         return out
     tu = tu[:n]
     applied_f = applied[:n].astype(np.float64, copy=False)
-    out["mem_adaptor/applied_mean_per_step"] = float(np.mean(applied_f))
 
     rej_f: Optional[np.ndarray] = None
     if "mem_adaptor_reject" in ntb:
         rej = np.asarray(ntb["mem_adaptor_reject"]).reshape(-1)
         if rej.size >= n:
             rej_f = rej[:n].astype(np.float64, copy=False)
-            out["mem_adaptor/reject_mean_per_step"] = float(np.mean(rej_f))
 
     _, inv = np.unique(tu, return_inverse=True)
     K = int(inv.max()) + 1 if inv.size else 0
     if K <= 0:
         return out
-    cnts = np.bincount(inv, minlength=K).astype(np.float64)
-    safe = np.maximum(cnts, 1.0)
     sums_a = np.bincount(inv, weights=applied_f, minlength=K)
-    per_traj_a = sums_a / safe
-    out["mem_adaptor/applied_mean_per_traj"] = float(np.mean(per_traj_a))
-    out["mem_adaptor/applied_min_per_traj"] = float(np.min(per_traj_a))
-    out["mem_adaptor/applied_max_per_traj"] = float(np.max(per_traj_a))
+    applied_traj = sums_a > 0.0
+    out["mem_adaptor/applied_count_per_traj_mean"] = float(np.mean(sums_a))
+    out["mem_adaptor/applied_traj_count"] = float(np.sum(applied_traj))
 
     if rej_f is not None:
         sums_r = np.bincount(inv, weights=rej_f, minlength=K)
-        per_traj_r = sums_r / safe
-        out["mem_adaptor/reject_mean_per_traj"] = float(np.mean(per_traj_r))
-        out["mem_adaptor/reject_min_per_traj"] = float(np.min(per_traj_r))
-        out["mem_adaptor/reject_max_per_traj"] = float(np.max(per_traj_r))
+        rejected_traj = sums_r > 0.0
+        accepted_step_f = np.maximum(applied_f - rej_f, 0.0)
+        sums_acc = np.bincount(inv, weights=accepted_step_f, minlength=K)
+        accepted_traj = sums_acc > 0.0
+        out["mem_adaptor/reject_count_per_traj_mean"] = float(np.mean(sums_r))
+        out["mem_adaptor/rejected_traj_count"] = float(np.sum(rejected_traj))
+        out["mem_adaptor/accepted_count_per_traj_mean"] = float(np.mean(sums_acc))
+        out["mem_adaptor/accepted_traj_count"] = float(np.sum(accepted_traj))
+    else:
+        rejected_traj = None
+        accepted_traj = None
 
     if "traj_episode_success" in ntb:
         succ = np.asarray(ntb["traj_episode_success"], dtype=np.float64).reshape(-1)
@@ -144,28 +149,12 @@ def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any
                     first_success[traj_i] = succ_f[row_i]
                     seen_success[traj_i] = True
 
-            applied_traj = sums_a > 0.0
-            out["mem_adaptor/applied_traj_count"] = float(np.sum(applied_traj))
             if np.any(applied_traj):
-                applied_success = float(np.mean(first_success[applied_traj]))
-                out["mem_adaptor/success_rate_when_applied"] = applied_success
-                out["mem_adaptor/failure_rate_when_applied"] = 1.0 - applied_success
-
-            if rej_f is not None:
-                rejected_traj = sums_r > 0.0
-                out["mem_adaptor/rejected_traj_count"] = float(np.sum(rejected_traj))
-                if np.any(rejected_traj):
-                    rejected_success = float(np.mean(first_success[rejected_traj]))
-                    out["mem_adaptor/success_rate_when_rejected"] = rejected_success
-                    out["mem_adaptor/failure_rate_when_rejected"] = 1.0 - rejected_success
-
-                accepted_step_f = np.maximum(applied_f - rej_f, 0.0)
-                accepted_traj = np.bincount(inv, weights=accepted_step_f, minlength=K) > 0.0
-                out["mem_adaptor/accepted_traj_count"] = float(np.sum(accepted_traj))
-                if np.any(accepted_traj):
-                    accepted_success = float(np.mean(first_success[accepted_traj]))
-                    out["mem_adaptor/success_rate_when_accepted"] = accepted_success
-                    out["mem_adaptor/failure_rate_when_accepted"] = 1.0 - accepted_success
+                out["mem_adaptor/success_rate_when_applied"] = float(np.mean(first_success[applied_traj]))
+            if rejected_traj is not None and np.any(rejected_traj):
+                out["mem_adaptor/success_rate_when_rejected"] = float(np.mean(first_success[rejected_traj]))
+            if accepted_traj is not None and np.any(accepted_traj):
+                out["mem_adaptor/success_rate_when_accepted"] = float(np.mean(first_success[accepted_traj]))
 
     return out
 
@@ -249,11 +238,11 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
             - reward/outcome|format|combined: mean + min + max for the three scalar components.
             - reward/format_* (think/action/memory counts, etc.): **mean only** (no min/max).
-            - episode/memory_retrieval_count/* & memory/retrieval_count_*_per_traj: per-trajectory **env-side**
-              retrieval counts (injection + memory_query steps; see rollout_loop).
+            - memory/retrieval_count_per_traj_mean: per-trajectory **env-side** retrieval count
+              (injection + memory_query steps; see rollout_loop).
             - memory/retrieve_* , memory/vdb_row_count, etc.: from ``batch.meta_info["memory_rollout_metrics"]``
               (VDB timing, row count, write-back); logged in the same step as training metrics.
-            - mem_adaptor/applied_* , mem_adaptor/reject_* and conditional success/failure rates: from
+            - mem_adaptor/*_count_per_traj_mean and trajectory-level conditional success rates: from
               ``batch.non_tensor_batch`` when MemAdaptor writes step diagnostics (inference rollout;
               independent of ``train_memory_adaptor``).
     """
@@ -350,15 +339,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         mrc = np.asarray(batch.non_tensor_batch["memory_retrieval_counts"], dtype=np.float64).reshape(-1)
         um = mrc[unique_idx]
         if um.size > 0:
-            mean_m = float(np.mean(um))
-            max_m = float(np.max(um))
-            min_m = float(np.min(um))
-            metrics["episode/memory_retrieval_count/mean"] = mean_m
-            metrics["episode/memory_retrieval_count/max"] = max_m
-            metrics["episode/memory_retrieval_count/min"] = min_m
-            metrics["memory/retrieval_count_mean_per_traj"] = mean_m
-            metrics["memory/retrieval_count_max_per_traj"] = max_m
-            metrics["memory/retrieval_count_min_per_traj"] = min_m
+            metrics["memory/retrieval_count_per_traj_mean"] = float(np.mean(um))
     _mm = (batch.meta_info or {}).get("memory_rollout_metrics")
     if isinstance(_mm, dict):
         for _mk, _mv in _mm.items():

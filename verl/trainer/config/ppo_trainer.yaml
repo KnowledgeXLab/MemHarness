@@ -536,7 +536,9 @@ mem_adaptor:
   train_global_step_start: null   # inclusive; null = no lower bound
   train_global_step_end: null     # exclusive upper bound; null = unbounded
   # Env-step window for running the adaptor (reduces training rows when memory only matters mid/late episode).
-  # Index = episode_lengths[i] AFTER the env step (1-based). Inclusive start, exclusive end.
+  # Index = episode_lengths[i] AFTER an env step (1-based). For agentic memory_query turns with
+  # env.memory.count_query_as_step=false, the rollout uses current decision step = episode_lengths[i] + 1.
+  # Inclusive start, exclusive end.
   # Example: max_steps=30 → env_step_end=31 runs adaptor on env steps 1..30; every_n=2 → steps 1,3,5,...
   env_step_start: null            # inclusive 1-based env step; null defaults to 1
   env_step_end: null              # exclusive; null = unbounded
@@ -592,3 +594,8 @@ mem_adaptor:
   do_sample: true
   temperature: 1
   top_p: 1.0
+  # Randomly log adaptor I/O to stderr (each adaptor row is one Bernoulli trial). 0 = disabled.
+  debug_io_trace_sample_rate: 0.2
+  debug_io_trace_max_chars: 2000
+  # Fixed seed for reproducible sampling within each Ray worker process; null = nondeterministic.
+  debug_io_trace_seed: null

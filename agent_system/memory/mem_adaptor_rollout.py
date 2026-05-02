@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import random
 import re
+import sys
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -92,6 +94,64 @@ def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tupl
 def _top1_retrieved_fields(memory_event: Any) -> Tuple[str, str]:
     pairs = _retrieved_state_principle_pairs(memory_event, 1)
     return pairs[0] if pairs else ("", "")
+
+
+def _trunc_one_line(s: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    t = (s or "").replace("\r", " ").replace("\n", "\\n")
+    if len(t) <= max_chars:
+        return t
+    return t[: max_chars - 3] + "..."
+
+
+def _maybe_log_adaptor_io_trace(
+    *,
+    ma: DictConfig,
+    row_trace_meta: List[Dict[str, Any]],
+    dec: List[str],
+    infos: List[Dict[str, Any]],
+    traj_uid: Optional[np.ndarray],
+    trainer_global_step: Optional[int],
+) -> None:
+    rate = float(ma.get("debug_io_trace_sample_rate", 0.0) or 0.0)
+    if rate <= 0.0 or not row_trace_meta:
+        return
+    max_c = int(ma.get("debug_io_trace_max_chars", 2000) or 2000)
+    seed_v = ma.get("debug_io_trace_seed", None)
+    rng = random.Random(int(seed_v)) if seed_v is not None else random.Random()
+    empty_markers = list(ma["empty_output_markers"])
+    for k, meta in enumerate(row_trace_meta):
+        if k >= len(dec):
+            break
+        if rng.random() >= rate:
+            continue
+        env_i = int(meta["env_i"])
+        tu = ""
+        if traj_uid is not None and 0 <= env_i < len(traj_uid):
+            tu = str(traj_uid[env_i])
+        raw = dec[k]
+        norm, rej = _normalize_adaptor_output(str(raw), empty_markers)
+        ev = infos[env_i].get("memory_event") if env_i < len(infos) else None
+        n_ret = 0
+        if isinstance(ev, dict):
+            n_ret = len(ev.get("retrieved") or [])
+        inj = ""
+        if env_i < len(infos):
+            inj = str(infos[env_i].get("memory_injected_text") or "")
+        gs = "" if trainer_global_step is None else str(int(trainer_global_step))
+        print(
+            "[mem_adaptor.debug_io] "
+            f"global_step={gs} traj_uid={tu} env_i={env_i} n_retrieved={n_ret} normalize_reject={rej}\n"
+            f"  s_curr ({len(meta['s_curr'])} chars): {_trunc_one_line(meta['s_curr'], max_c)}\n"
+            f"  s_old  ({len(meta['s_old'])} chars): {_trunc_one_line(meta['s_old'], max_c)}\n"
+            f"  p_old  ({len(meta['p_old'])} chars): {_trunc_one_line(meta['p_old'], max_c)}\n"
+            f"  injected_snippet ({len(inj)} chars): {_trunc_one_line(inj, max_c)}\n"
+            f"  adaptor_raw ({len(raw)} chars): {_trunc_one_line(raw, max_c)}\n"
+            f"  adaptor_norm ({len(norm)} chars): {_trunc_one_line(norm, max_c)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _should_run_adaptor_for_index(
@@ -448,6 +508,7 @@ def maybe_apply_memory_adaptor(
 
     row_env_indices: List[int] = []
     rows: List[dict] = []
+    row_trace_meta: List[Dict[str, Any]] = []
     for i in range(batch_n):
         if not _should_run_adaptor_for_index(schedule, infos[i], active=bool(active_masks[i])):
             continue
@@ -500,6 +561,14 @@ def maybe_apply_memory_adaptor(
             )
             row_env_indices.append(i)
             rows.append(row)
+            row_trace_meta.append(
+                {
+                    "env_i": i,
+                    "s_curr": s_curr,
+                    "s_old": s_old,
+                    "p_old": p_old,
+                }
+            )
 
     if not rows:
         return
@@ -515,6 +584,15 @@ def maybe_apply_memory_adaptor(
     out = unpad_dataproto(out_pad, pad_size=pad_size)
     n = len(row_env_indices)
     dec = tokenizer.batch_decode(out.batch["responses"][:n], skip_special_tokens=True)
+
+    _maybe_log_adaptor_io_trace(
+        ma=ma,
+        row_trace_meta=row_trace_meta,
+        dec=dec,
+        infos=infos,
+        traj_uid=traj_uid,
+        trainer_global_step=trainer_global_step,
+    )
 
     if adaptor_training_buffer is not None and n > 0 and traj_uid is not None:
         pad_tok = int(pad_token_id)
