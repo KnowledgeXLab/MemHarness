@@ -560,6 +560,9 @@ mem_adaptor:
   system_prompt: >-
     You adapt a retrieved memory principle to the CURRENT situation, or output exactly <EMPTY> if the principle does not apply.
   user_message_template: |-
+    Initial task:
+    {task}
+
     Current situation (state):
     {s_curr}
 

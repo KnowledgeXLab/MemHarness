@@ -143,6 +143,7 @@ def _maybe_log_adaptor_io_trace(
         print(
             "[mem_adaptor.debug_io] "
             f"global_step={gs} traj_uid={tu} env_i={env_i} n_retrieved={n_ret} normalize_reject={rej}\n"
+            f"  task   ({len(meta.get('task', ''))} chars): {_trunc_one_line(meta.get('task', ''), max_c)}\n"
             f"  s_curr ({len(meta['s_curr'])} chars): {_trunc_one_line(meta['s_curr'], max_c)}\n"
             f"  s_old  ({len(meta['s_old'])} chars): {_trunc_one_line(meta['s_old'], max_c)}\n"
             f"  p_old  ({len(meta['p_old'])} chars): {_trunc_one_line(meta['p_old'], max_c)}\n"
@@ -225,10 +226,22 @@ def _clip(s: str, max_chars: int) -> str:
     return s[: max_chars - 3] + "..."
 
 
+_TASK_RE = re.compile(r"Your task is to:\s*(.*?)(?:\.|\n)", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_task_from_text(text: str) -> str:
+    """Best-effort task extraction from ALFWorld-style observation prompts."""
+    m = _TASK_RE.search(text or "")
+    if not m:
+        return ""
+    return " ".join(m.group(1).strip().split())
+
+
 def _build_adaptor_prompt(
     tokenizer: PreTrainedTokenizer,
     ma: DictConfig,
     *,
+    task: str,
     s_curr: str,
     s_old: str,
     p_old: str,
@@ -236,6 +249,7 @@ def _build_adaptor_prompt(
 ) -> str:
     tmpl = str(ma["user_message_template"])
     user_content = tmpl.format(
+        task=_clip(task, int(ma["max_prompt_chars"])),
         s_curr=_clip(s_curr, int(ma["max_prompt_chars"])),
         s_old=_clip(s_old, int(ma["max_prompt_chars"])),
         p_old=_clip(p_old, int(ma["max_prompt_chars"])),
@@ -523,6 +537,7 @@ def maybe_apply_memory_adaptor(
             s_curr = str(anchors[i] if anchors[i] is not None else "")
         else:
             s_curr = str(texts[i] if texts[i] is not None else "")
+        task = _extract_task_from_text(str(texts[i] if texts[i] is not None else ""))
 
         if schedule == "on_memory_only":
             injected = infos[i]["memory_injected_text"].strip()
@@ -547,6 +562,7 @@ def maybe_apply_memory_adaptor(
             prompt = _build_adaptor_prompt(
                 tokenizer,
                 ma,
+                task=task,
                 s_curr=s_curr,
                 s_old=s_old,
                 p_old=p_old,
@@ -564,6 +580,7 @@ def maybe_apply_memory_adaptor(
             row_trace_meta.append(
                 {
                     "env_i": i,
+                    "task": task,
                     "s_curr": s_curr,
                     "s_old": s_old,
                     "p_old": p_old,
