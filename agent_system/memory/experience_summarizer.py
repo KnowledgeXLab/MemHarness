@@ -3,8 +3,8 @@
 # Online experience / memory write-back: LLM extracts JSON ``{"memories":[...]}`` per trajectory, then VDB insert.
 # - mode=self: batch prompts to ``actor_rollout_wg.generate_sequences`` (same Reasoning rollout worker).
 # - mode=teacher: OpenAI-compatible ``/v1/chat/completions`` on the driver (no Ray worker).
-# - schema=compact: model outputs ``situation`` + ``memory_text`` (+ optional ``source_step``); ``action_text`` may be
-#   filled from the trajectory when missing. Stored ``state_text`` is seeded from ``situation`` (then step / placeholder).
+# - schema=compact: model outputs ``situation`` + ``memory`` or ``memory_text`` (synonyms); ``action_text`` may be
+#   filled from the trajectory when missing. Stored ``state_text`` is seeded from ``situation`` (then placeholder).
 #   schema=full matches ``extract_memory_records.py``.
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ Trajectory:
 {trajectory_text}
 """
 
-# Fewer fields for weak extractors (small models / self-distill). Model outputs ``situation`` + ``memory_text`` (+ optional ``source_step``);
+# Fewer fields for weak extractors (small models / self-distill). Model outputs ``situation`` + ``memory`` (or ``memory_text``);
 # ``action_text`` can still be filled from the trajectory when missing.
 DEFAULT_COMPACT_JSON_SYSTEM_PROMPT = """You are a JSON-only memory extractor.
 
@@ -113,16 +113,14 @@ Return only this JSON shape:
   "memories": [
     {{
       "situation": "one short sentence describing when this advice applies",
-      "memory_text": "one short sentence describing what to do or check",
-      "source_step": 1
+      "memory": "one short sentence describing what to do or check"
     }}
   ]
 }}
 
 Field rules:
 - situation: generalized state or precondition, not a full observation dump.
-- memory_text: reusable advice, not a recap and not a next action command.
-- source_step: optional 1-based agent step where the memory is grounded.
+- memory: reusable advice, not a recap and not a next action command.
 - If no useful memory exists, return {{"memories": []}}.
 
 Trajectory:
@@ -1050,6 +1048,10 @@ def _memory_record_from_extracted_dict(
             st_raw = sit
     at_raw = memory["action_text"] if "action_text" in memory and memory["action_text"] is not None else ""
     mt_raw = memory["memory_text"] if "memory_text" in memory and memory["memory_text"] is not None else ""
+    if (not str(mt_raw).strip()) and schema_n == "compact":
+        mem_alt = memory.get("memory")
+        if mem_alt is not None:
+            mt_raw = mem_alt
     memory_text = normalize_text(str(mt_raw), max_chars=max_memory_chars)
     if not memory_text:
         return None

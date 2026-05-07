@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=128
-#SBATCH --gpus-per-task=6
+#SBATCH --gpus-per-task=8
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --output=logs/cold_start/%x-%j.out
 #SBATCH --error=logs/cold_start/%x-%j.err
@@ -69,7 +69,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   data.val_files="${VAL_FILES}" \
   data.multiturn.enable=true \
   data.multiturn.messages_key=messages \
-  data.train_batch_size=12 \
+  data.train_batch_size=16 \
   data.micro_batch_size_per_gpu=4 \
   data.max_length=8192 \
   data.truncation=right \
