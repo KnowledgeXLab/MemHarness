@@ -21,15 +21,18 @@ if [ -z "$data" ]; then
   helpFunction
 fi
 
-# Install Python Dependencies
-pip install -r requirements.txt;
+# Binary packages first: sentencepiece/lightgbm often fail to compile from sdist when the
+# system GCC is too old (e.g. CentOS 7 default). conda-forge ships prebuilt libs.
+conda install -y mkl
+conda install -y -c conda-forge sentencepiece lightgbm faiss-cpu openjdk=11
 
-conda install mkl
-conda install -c conda-forge faiss-cpu
+# pip may ship man pages (e.g. sympy's isympy.1); minimal conda envs often lack this path.
+if [ -n "${CONDA_PREFIX:-}" ]; then
+  mkdir -p "${CONDA_PREFIX}/share/man/man1"
+fi
 
-# Install Environment Dependencies via `conda`
-# conda install -c pytorch faiss-cpu;
-conda install -c conda-forge openjdk=11;
+# Install Python Dependencies (pip skips sentencepiece/lightgbm if already satisfied)
+pip install -r requirements.txt
 
 # Download dataset into `data` folder via `gdown` command
 mkdir -p data;

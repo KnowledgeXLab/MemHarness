@@ -93,45 +93,37 @@ Trajectory:
 
 # Fewer fields for weak extractors (small models / self-distill). Model outputs ``situation`` + ``memory_text`` (+ optional ``source_step``);
 # ``action_text`` can still be filled from the trajectory when missing.
-DEFAULT_COMPACT_JSON_SYSTEM_PROMPT = """You analyze agent trajectories and distill generalizable wisdom (Guiding or Warning Principles).
-Each principle must be useful later: another run in a similar situation should benefit from retrieving it.
+DEFAULT_COMPACT_JSON_SYSTEM_PROMPT = """You are a JSON-only memory extractor.
 
-Output one JSON object only. No markdown fences, no commentary before or after the JSON.
+Read a completed agent trajectory and write reusable advice for future similar states.
 
-Requirements:
-- Ground every principle in the trajectory; do not invent facts.
-- For each item output two sentences as two fields:
-  - situation: one short English sentence — the generalized context or preconditions when this advice applies (good as a retrieval key). Not a full observation dump.
-  - memory_text: one clear English sentence — the core advice (what to do or check). No bullet lists inside memory_text.
-- Prefer strategies that explain what to do or check, not a play-by-play recap of this episode.
-- Generalize: do not copy long strings of object disambiguators (e.g. "tomato 4", "cabinet 3") unless one short mention is needed; prefer "the target object", "the goal receptacle", or the object class.
-- Each principle should be one coherent subgoal or check; do not merge unrelated steps into one sentence, and do not output principles that contradict each other for the same object."""
+Critical rules:
+- Return exactly one JSON object and nothing else.
+- Do not continue the trajectory.
+- Do not write thoughts, actions, markdown, XML tags, or explanations.
+- Do not copy raw <think>, <action>, or <memory_retrieve> text.
+- Each memory must be grounded in the trajectory and useful later."""
 
 DEFAULT_COMPACT_JSON_TRAJECTORY_USER_PROMPT_TEMPLATE = """Benchmark: "{task_name}".
-The trajectory below is from one episode. Extract at most {num_memories} short principles (not raw action traces).
-Each principle must be independently useful if stored in a memory bank and retrieved later.
 
-Return JSON exactly in this shape. ``source_step`` is optional (1-based index of the agent turn the principle is grounded in).
+Task: extract at most {num_memories} reusable memories from the completed trajectory below.
+
+Return only this JSON shape:
 {{
   "memories": [
     {{
-      "situation": "one-sentence generalized context or preconditions when this applies",
-      "memory_text": "one-sentence principle / what to do or check",
+      "situation": "one short sentence describing when this advice applies",
+      "memory_text": "one short sentence describing what to do or check",
       "source_step": 1
     }}
   ]
 }}
 
-Example (different task—format only):
-{{
-  "memories": [
-    {{
-      "situation": "A file download fails with an HTTP client error.",
-      "memory_text": "When a download fails with a 404, verify the URL before retrying instead of repeating the same request.",
-      "source_step": 2
-    }}
-  ]
-}}
+Field rules:
+- situation: generalized state or precondition, not a full observation dump.
+- memory_text: reusable advice, not a recap and not a next action command.
+- source_step: optional 1-based agent step where the memory is grounded.
+- If no useful memory exists, return {{"memories": []}}.
 
 Trajectory:
 {trajectory_text}

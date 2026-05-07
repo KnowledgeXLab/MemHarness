@@ -2,8 +2,8 @@
 #SBATCH --job-name=mem-cold-sft
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gpus-per-task=4
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-task=6
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --output=logs/cold_start/%x-%j.out
 #SBATCH --error=logs/cold_start/%x-%j.err
@@ -30,7 +30,7 @@ mkdir -p "${REPO_ROOT}/logs/cold_start"
 
 export HYDRA_FULL_ERROR="1"
 
-export EXP_NAME="qwen2.5-1.5b-cold-start-20260430"
+export EXP_NAME="qwen2.5-14b-cold-start-20260430"
 
 # 本地仓库需放在 PYTHONPATH，否则可能找不到 verl / 项目包
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
@@ -38,7 +38,7 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 # ---------- 数据与模型 ----------
 TRAIN_FILES="data/MemAdaptor/cold_start/20260429_sample1000_seed42_train.parquet"
 VAL_FILES="data/MemAdaptor/cold_start/20260429_sample100_seed42_val.parquet"
-MODEL_ID="models/public_models/Qwen2.5-1.5B-Instruct"
+MODEL_ID="models/public_models/Qwen2.5-14B-Instruct"
 
 # 避免多次实验共写一个目录互相覆盖；可按需改成含 SLURM_JOB_ID
 SAVE_ROOT="models/save_models/mem_adaptor/cold_start/${EXP_NAME}"
@@ -69,7 +69,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   data.val_files="${VAL_FILES}" \
   data.multiturn.enable=true \
   data.multiturn.messages_key=messages \
-  data.train_batch_size=8 \
+  data.train_batch_size=12 \
   data.micro_batch_size_per_gpu=4 \
   data.max_length=8192 \
   data.truncation=right \
@@ -82,7 +82,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   trainer.project_name=memadaptor-cold-start \
   trainer.experiment_name="${EXP_NAME}" \
   trainer.logger=['wandb','console'] \
-  trainer.total_epochs=3 \
+  trainer.total_epochs=2 \
   trainer.default_hdfs_dir=null \
   ulysses_sequence_parallel_size=2 \
   use_remove_padding=true \

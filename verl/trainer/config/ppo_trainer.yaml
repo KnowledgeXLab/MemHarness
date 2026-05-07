@@ -394,13 +394,13 @@ env:
     experience_summarizer:
       mode: none   # none | self (actor_rollout_wg.generate_sequences) | teacher (OpenAI-compatible HTTP)
       # full: JSON with state_text, action_text, memory_text, optional metadata (strong models / GPT-style offline extract).
-      # compact: model outputs only memory_text (+ optional source_step); state/action filled from trajectory (weak self-distill).
+      # compact: model outputs situation + memory_text (+ optional source_step); action filled from trajectory (weak self-distill).
       schema: full
       num_memories_per_trajectory: 1 # how many memories to extract from each trajectory
       summarization_batch_size: 0 # max trajectories per LLM batch (0 = submit all pending trajectories in one call).
       # After filtering (e.g. only_store_positive_reward), keep at most round(rollout.n * fraction) trajectories per GRPO group
       # for write-back summarization; prefer balanced success/failure, then fill from the larger pool (random). 1.0 = keep all.
-      grpo_summarize_keep_fraction: 0.25
+      grpo_summarize_keep_fraction: 0.5
       parse_max_attempts: 3 # max model calls when JSON parse yields no memories or all items fail validation (state/action/memory_text).
       extractor_model_label: online_rollout # optional label stored in record metadata (teacher defaults to openai_api.model).
       system_prompt: "" # empty -> built-in JSON extraction system prompt
@@ -410,7 +410,7 @@ env:
       summarizer_trajectory_episode_max_turns: 50
       summarizer_trajectory_head_turns: 10
       summarizer_trajectory_tail_turns: 10
-      summarizer_trajectory_min_turns_kept: 8
+      summarizer_trajectory_min_turns_kept: 6
       summarizer_trajectory_token_trim: true
       summarizer_trajectory_include_coverage_note: true
       # Summarizer-only prompt token budget (trajectory trim + mode=self encoding). Null = use full vLLM cap
@@ -438,7 +438,7 @@ env:
       prune_score_threshold: 0.35    # Drop when Laplace utility below this (after min_uses_before_prune).
       min_uses_before_prune: 3       # Require at least this many retrievals before a row is eligible for pruning.
       clear_every_n_global_steps: 0  # 0 = disabled; if >0, drops and recreates empty collection every N steps (runs before prune).
-    count_query_as_step: False   # Whether a parsed agentic memory query should also consume one episode step.
+    count_query_as_step: True   # Whether a parsed agentic memory query should also consume one episode step.
     vdb_base_url: null   # Base URL of the HTTP memory service when backend=http.
     server_bind_host: "0.0.0.0"   # Bind host for the local memory service.
     server_advertised_host: null   # Host advertised to workers; auto-detected when null.
@@ -558,7 +558,8 @@ mem_adaptor:
   #     env_step_every_n: 2
   env_step_phases: null
   system_prompt: >-
-    You adapt a retrieved memory principle to the CURRENT situation, or output exactly <EMPTY> if the principle does not apply.
+    You adapt a retrieved memory principle into a concise reusable guidance for the CURRENT situation and initial task, or output exactly <EMPTY> if the principle does not apply.
+    Do not write chain-of-thought, first-person reasoning, or a step-by-step action plan.
   user_message_template: |-
     Initial task:
     {task}
@@ -572,7 +573,11 @@ mem_adaptor:
     Historical principle (memory):
     {p_old}
 
-    Output ONLY the adapted principle text, or exactly <EMPTY>.
+    Output rules:
+    - Output exactly one short adapted principle, or exactly <EMPTY>.
+    - Write in imperative or neutral guidance style.
+    - Do NOT use first person ("I", "my", "we") or phrases like "therefore", "I need to", "since".
+    - Do NOT explain your reasoning or describe multiple next steps.
   empty_output_markers:
     - "<EMPTY>"
     - "<empty>"
@@ -598,7 +603,7 @@ mem_adaptor:
   temperature: 1
   top_p: 1.0
   # Randomly log adaptor I/O to stderr (each adaptor row is one Bernoulli trial). 0 = disabled.
-  debug_io_trace_sample_rate: 0.2
+  debug_io_trace_sample_rate: 0.005
   debug_io_trace_max_chars: 2000
   # Fixed seed for reproducible sampling within each Ray worker process; null = nondeterministic.
   debug_io_trace_seed: null
