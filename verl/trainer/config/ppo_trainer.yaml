@@ -330,6 +330,18 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  # When validation improves, optionally save extra checkpoints under ``default_local_dir/<save_best_val_subdir>/``.
+  # Does not affect ``latest_checkpointed_iteration.txt`` or periodic ``save_freq`` (resume still follows global_step_*).
+  save_best_val_ckpt: false
+  # Exact key from ``_validate()`` metric dict, e.g. ``val/text/test_score`` (depends on dataset ``data_source``).
+  save_best_val_metric: null
+  save_best_val_mode: max   # max | min
+  save_best_val_max_to_keep: 3
+  save_best_val_subdir: best_val
+  # If ``global_step_<N>/actor`` already exists (same training step), best-val entry is a symlink instead of a full copy.
+  # Requires periodic ``save_checkpoint`` to run before validation in the training loop (same ``global_steps``).
+  # Warning: rotating deletes under ``max_actor_ckpt_to_keep`` can remove a periodic folder that ``best_val`` still links to.
+  save_best_val_symlink_when_periodic_exists: true
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null

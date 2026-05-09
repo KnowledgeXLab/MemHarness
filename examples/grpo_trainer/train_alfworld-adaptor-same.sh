@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.2:8265'
+export RAY_ADDRESS='http://10.140.37.15:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -11,7 +11,8 @@ export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
 # MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-1.5b-cold-start-20260430/global_step_125'
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-1.5b-cold-start-20260430/global_step_125'
+MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
 
 # --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"

@@ -21,6 +21,8 @@ This trainer supports model-agonistic model initialization with huggingface
 import json
 import os
 import random
+import shutil
+import time
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -28,7 +30,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Dict, Optional, Set, Type
+from typing import Any, Dict, List, Optional, Set, Type
 
 import numpy as np
 import ray
@@ -1296,46 +1298,275 @@ class RayPPOTrainer:
                 worker_group=self.actor_rollout_wg,
             )
 
-    def _save_checkpoint(self):
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
+    def _save_checkpoint_at(
+        self,
+        local_global_step_folder: str,
+        *,
+        update_latest_tracker: bool,
+        hdfs_step_folder_name: Optional[str],
+    ) -> None:
+        """Persist actor / optional mem_adaptor / critic + dataloader state under ``local_global_step_folder``.
 
+        ``hdfs_step_folder_name``: segment under ``default_hdfs_dir`` (e.g. ``global_step_50``).
+        Pass ``None`` to skip remote paths (used for best-val snapshots saved only locally).
+        """
+        os.makedirs(local_global_step_folder, exist_ok=True)
         print(f"local_global_step_folder: {local_global_step_folder}")
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
-        actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
+        if self.config.trainer.default_hdfs_dir is None or not hdfs_step_folder_name:
+            actor_remote_path = None
+        else:
+            actor_remote_path = os.path.join(
+                self.config.trainer.default_hdfs_dir, hdfs_step_folder_name, "actor"
+            )
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
-            print("Warning: remove_previous_ckpt_in_save is deprecated," + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead")
-        max_actor_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        max_critic_ckpt_to_keep = self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            print(
+                "Warning: remove_previous_ckpt_in_save is deprecated,"
+                " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+            )
+        max_actor_ckpt_to_keep = (
+            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        )
+        max_critic_ckpt_to_keep = (
+            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        )
 
-        self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
+        self.actor_rollout_wg.save_checkpoint(
+            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+        )
 
         if self.adaptor_rollout_wg is not None:
             ma_local = os.path.join(local_global_step_folder, "mem_adaptor")
-            ma_remote = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "mem_adaptor")
+            if self.config.trainer.default_hdfs_dir is None or not hdfs_step_folder_name:
+                ma_remote = None
+            else:
+                ma_remote = os.path.join(
+                    self.config.trainer.default_hdfs_dir, hdfs_step_folder_name, "mem_adaptor"
+                )
+            self.adaptor_rollout_wg.save_checkpoint(
+                ma_local, ma_remote, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
             )
-            self.adaptor_rollout_wg.save_checkpoint(ma_local, ma_remote, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, "critic")
-            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "critic")
-            self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep)
+            if self.config.trainer.default_hdfs_dir is None or not hdfs_step_folder_name:
+                critic_remote_path = None
+            else:
+                critic_remote_path = os.path.join(
+                    self.config.trainer.default_hdfs_dir, hdfs_step_folder_name, "critic"
+                )
+            self.critic_wg.save_checkpoint(
+                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+            )
 
-        # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
-        # latest checkpointed iteration tracker (for atomic usage)
-        local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
-        with open(local_latest_checkpointed_iteration, "w") as f:
-            f.write(str(self.global_steps))
+        if update_latest_tracker:
+            local_latest_checkpointed_iteration = os.path.join(
+                self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
+            )
+            with open(local_latest_checkpointed_iteration, "w") as f:
+                f.write(str(self.global_steps))
+
+    def _save_checkpoint(self):
+        local_global_step_folder = os.path.join(
+            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+        )
+        self._save_checkpoint_at(
+            local_global_step_folder,
+            update_latest_tracker=True,
+            hdfs_step_folder_name=f"global_step_{self.global_steps}",
+        )
+
+    def _best_val_checkpoint_root(self) -> str:
+        sub = str(self.config.trainer.get("save_best_val_subdir", "best_val") or "best_val").strip() or "best_val"
+        return os.path.join(self.config.trainer.default_local_dir, sub)
+
+    def _best_val_manifest_path(self) -> str:
+        return os.path.join(self._best_val_checkpoint_root(), "best_val_manifest.json")
+
+    @staticmethod
+    def _best_val_sorted_entries(entries: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+        mode_n = str(mode or "max").strip().lower()
+        if mode_n == "min":
+            return sorted(entries, key=lambda e: (float(e["score"]), -int(e["global_step"])))
+        return sorted(entries, key=lambda e: (-float(e["score"]), -int(e["global_step"])))
+
+    def _read_best_val_manifest(self) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        path = self._best_val_manifest_path()
+        if not os.path.isfile(path):
+            return [], None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return [], None
+        if not isinstance(data, dict):
+            return [], None
+        entries = data.get("entries") or []
+        if not isinstance(entries, list):
+            return [], None
+        clean: List[Dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            try:
+                clean.append(
+                    {
+                        "global_step": int(e["global_step"]),
+                        "score": float(e["score"]),
+                        "rel_path": str(e.get("rel_path") or f'global_step_{int(e["global_step"])}'),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return clean, data.get("metric") if isinstance(data.get("metric"), str) else None
+
+    def _write_best_val_manifest(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        metric_key: str,
+        mode: str,
+        max_to_keep: int,
+    ) -> None:
+        root = self._best_val_checkpoint_root()
+        os.makedirs(root, exist_ok=True)
+        path = self._best_val_manifest_path()
+        payload = {
+            "metric": metric_key,
+            "mode": str(mode),
+            "max_to_keep": int(max_to_keep),
+            "entries": entries,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _maybe_save_best_val_checkpoint(self, val_metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """If configured, save under ``default_local_dir/<save_best_val_subdir>/`` when validation metric is top-K."""
+        out: Dict[str, Any] = {}
+        if not bool(self.config.trainer.get("save_best_val_ckpt", False)):
+            return out
+        metric_key = self.config.trainer.get("save_best_val_metric", None)
+        if not metric_key:
+            print(
+                "trainer.save_best_val_ckpt=true but save_best_val_metric is unset; skipping best-val checkpoint.",
+                flush=True,
+            )
+            return out
+        metric_key = str(metric_key)
+        mode = str(self.config.trainer.get("save_best_val_mode", "max") or "max").strip().lower()
+        if mode not in ("max", "min"):
+            print(f"trainer.save_best_val_mode must be max|min, got {mode!r}; skipping.", flush=True)
+            return out
+        max_k = int(self.config.trainer.get("save_best_val_max_to_keep", 3) or 3)
+        if max_k <= 0:
+            return out
+        if not val_metrics or metric_key not in val_metrics:
+            print(
+                f"best-val checkpoint: metric key {metric_key!r} missing from validation metrics; skip.",
+                flush=True,
+            )
+            return out
+        try:
+            score = float(val_metrics[metric_key])
+        except (TypeError, ValueError):
+            print(f"best-val checkpoint: metric {metric_key!r} is not numeric; skip.", flush=True)
+            return out
+
+        entries, manifest_metric = self._read_best_val_manifest()
+        if manifest_metric is not None and manifest_metric != metric_key:
+            print(
+                f"best-val checkpoint: manifest metric {manifest_metric!r} != config {metric_key!r}; "
+                "starting a fresh top-K list (old dirs left on disk).",
+                flush=True,
+            )
+            entries = []
+
+        combined = [e for e in entries if int(e["global_step"]) != int(self.global_steps)]
+        new_entry = {
+            "global_step": int(self.global_steps),
+            "score": score,
+            "rel_path": f"global_step_{int(self.global_steps)}",
+        }
+        combined.append(new_entry)
+        sorted_e = self._best_val_sorted_entries(combined, mode)
+        rank = next((i for i, e in enumerate(sorted_e) if int(e["global_step"]) == int(self.global_steps)), None)
+        if rank is None or rank >= max_k:
+            return out
+
+        best_root = os.path.abspath(self._best_val_checkpoint_root())
+        os.makedirs(best_root, exist_ok=True)
+        target_dir = os.path.abspath(os.path.join(best_root, new_entry["rel_path"]))
+        if os.path.lexists(target_dir):
+            self._remove_best_val_storage_path(target_dir)
+
+        use_symlink = bool(self.config.trainer.get("save_best_val_symlink_when_periodic_exists", True))
+        periodic_dir = self._periodic_checkpoint_dir_for_step()
+        symlink_ok = use_symlink and self._periodic_checkpoint_has_actor(periodic_dir)
+
+        print(
+            f"Saving best-val checkpoint (metric={metric_key!r} score={score:.6f} mode={mode} rank={rank + 1}/{max_k}) "
+            f"under {target_dir}",
+            flush=True,
+        )
+        t0 = time.perf_counter()
+        if symlink_ok:
+            os.symlink(os.path.abspath(periodic_dir), target_dir, target_is_directory=True)
+            elapsed = float(time.perf_counter() - t0)
+            out["timing_s/save_best_val_checkpoint"] = elapsed
+            out["checkpoint/best_val_symlink"] = 1.0
+            print(
+                f"best-val: symlink -> {os.path.abspath(periodic_dir)} (no duplicate full save)",
+                flush=True,
+            )
+        else:
+            self._save_checkpoint_at(
+                target_dir,
+                update_latest_tracker=False,
+                hdfs_step_folder_name=None,
+            )
+            out["timing_s/save_best_val_checkpoint"] = float(time.perf_counter() - t0)
+            out["checkpoint/best_val_symlink"] = 0.0
+
+        kept = sorted_e[:max_k]
+        removed = sorted_e[max_k:]
+        for e in removed:
+            rel = str(e.get("rel_path") or f'global_step_{int(e["global_step"])}')
+            stale = os.path.abspath(os.path.join(best_root, rel))
+            if os.path.lexists(stale):
+                self._remove_best_val_storage_path(stale)
+
+        self._write_best_val_manifest(kept, metric_key=metric_key, mode=mode, max_to_keep=max_k)
+
+        top_score = float(kept[0]["score"]) if kept else score
+        out["checkpoint/best_val_top_score"] = top_score
+        out["checkpoint/best_val_top_step"] = float(kept[0]["global_step"]) if kept else float(self.global_steps)
+        out["checkpoint/best_val_saved"] = 1.0
+        return out
+
+    def _periodic_checkpoint_dir_for_step(self, global_step: int | None = None) -> str:
+        step = int(self.global_steps if global_step is None else global_step)
+        root = self.config.trainer.default_local_dir
+        if not os.path.isabs(root):
+            root = os.path.join(os.getcwd(), root)
+        return os.path.join(root, f"global_step_{step}")
+
+    def _periodic_checkpoint_has_actor(self, periodic_dir: str) -> bool:
+        return os.path.isdir(os.path.join(periodic_dir, "actor"))
+
+    @staticmethod
+    def _remove_best_val_storage_path(path: str) -> None:
+        """Remove a best-val entry: symlink (unlink) or directory tree."""
+        if os.path.islink(path):
+            os.unlink(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1443,6 +1674,9 @@ class RayPPOTrainer:
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
+            best_extra = self._maybe_save_best_val_checkpoint(val_metrics)
+            if best_extra:
+                logger.log(data=best_extra, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
 
@@ -1822,6 +2056,11 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
+                    # Periodic checkpoint first so best-val can symlink to ``global_step_*`` when this step is both periodic and top-K val.
+                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                        with _timer("save_checkpoint", timing_raw):
+                            self._save_checkpoint()
+
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer("testing", timing_raw):
@@ -1829,10 +2068,7 @@ class RayPPOTrainer:
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
-
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
-                        with _timer("save_checkpoint", timing_raw):
-                            self._save_checkpoint()
+                        metrics.update(self._maybe_save_best_val_checkpoint(val_metrics))
 
                 # training metrics
                 metrics.update(

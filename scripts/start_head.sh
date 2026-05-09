@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=adaptor-1.5B
+#SBATCH --job-name=webshop-7B
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gpus-per-task=4
+#SBATCH --cpus-per-task=128
+#SBATCH --gpus-per-task=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --quotatype=reserved
