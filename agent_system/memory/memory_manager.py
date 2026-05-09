@@ -88,6 +88,18 @@ class MemoryManager:
             rebuild_source_collection_name=memory_config.rebuild_source_collection_name,
             rebuild_insert_batch_size=memory_config.rebuild_insert_batch_size,
             rebuild_embedding_batch_size=memory_config.rebuild_embedding_batch_size,
+            memory_text_retrieval_dedupe_similarity_threshold=memory_config.get(
+                "memory_text_retrieval_dedupe_similarity_threshold"
+            ),
+            memory_text_retrieval_dedupe_prefetch_limit=int(
+                memory_config.get("memory_text_retrieval_dedupe_prefetch_limit") or 24
+            ),
+            memory_text_insert_dedupe_similarity_threshold=memory_config.get(
+                "memory_text_insert_dedupe_similarity_threshold"
+            ),
+            memory_text_insert_dedupe_probe_limit=int(
+                memory_config.get("memory_text_insert_dedupe_probe_limit") or 40
+            ),
         )
         self.store.initialize(
             mode=memory_config.mode,

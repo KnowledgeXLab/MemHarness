@@ -189,6 +189,10 @@ class MemoryStoreDispatcher(BaseMemoryStore):
         rebuild_source_collection_name: str | None = None,
         rebuild_insert_batch_size: int = 1000,
         rebuild_embedding_batch_size: int = 256,
+        memory_text_retrieval_dedupe_similarity_threshold: float | None = None,
+        memory_text_retrieval_dedupe_prefetch_limit: int = 24,
+        memory_text_insert_dedupe_similarity_threshold: float | None = None,
+        memory_text_insert_dedupe_probe_limit: int = 40,
     ) -> None:
         normalized_backend = (backend or "").strip().lower()
         if not normalized_backend:
@@ -224,6 +228,10 @@ class MemoryStoreDispatcher(BaseMemoryStore):
             rebuild_source_collection_name=rebuild_source_collection_name,
             rebuild_insert_batch_size=rebuild_insert_batch_size,
             rebuild_embedding_batch_size=rebuild_embedding_batch_size,
+            memory_text_retrieval_dedupe_similarity_threshold=memory_text_retrieval_dedupe_similarity_threshold,
+            memory_text_retrieval_dedupe_prefetch_limit=memory_text_retrieval_dedupe_prefetch_limit,
+            memory_text_insert_dedupe_similarity_threshold=memory_text_insert_dedupe_similarity_threshold,
+            memory_text_insert_dedupe_probe_limit=memory_text_insert_dedupe_probe_limit,
         )
 
     def initialize(self, mode: str, clean_before_init: bool = False) -> None:

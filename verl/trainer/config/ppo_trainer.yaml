@@ -332,7 +332,7 @@ trainer:
   save_freq: -1
   # When validation improves, optionally save extra checkpoints under ``default_local_dir/<save_best_val_subdir>/``.
   # Does not affect ``latest_checkpointed_iteration.txt`` or periodic ``save_freq`` (resume still follows global_step_*).
-  save_best_val_ckpt: false
+  save_best_val_ckpt: True
   # Exact key from ``_validate()`` metric dict, e.g. ``val/text/test_score`` (depends on dataset ``data_source``).
   save_best_val_metric: null
   save_best_val_mode: max   # max | min
@@ -470,6 +470,11 @@ env:
     only_successful: False   # Whether retrieval only searches memories from successful trajectories.
     rebuild_insert_batch_size: 1000   # Batch size for inserting records during rebuild.
     rebuild_embedding_batch_size: 256   # Batch size for computing embeddings during rebuild.
+    # Cosine similarity dedupe on ``memory_text`` embeddings (same embedding API as indexing). null = disabled; threshold in [0, 1].
+    memory_text_retrieval_dedupe_similarity_threshold: 0.85
+    memory_text_retrieval_dedupe_prefetch_limit: 10   # Fetch at least this many Milvus hits before deduping down to top_k.
+    memory_text_insert_dedupe_similarity_threshold: 0.85
+    memory_text_insert_dedupe_probe_limit: 10   # Milvus neighbors checked per insert for similar existing memory_text.
     # Optional: submit a Slurm batch job on another node to run the FastAPI memory server (Apptainer + uvicorn).
     # Requires sbatch on the submit host; set enable=true, partition, and apptainer_sif for CentOS7 + Milvus Lite.
     remote_slurm_launch:

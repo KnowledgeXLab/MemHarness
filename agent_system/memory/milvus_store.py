@@ -15,6 +15,7 @@ from .experience_utility import (
     compute_utility_score,
     read_utility_score_from_metadata,
 )
+from .memory_text_dedupe import cosine_similarity_float_vectors, dedupe_indices_by_embedding_similarity
 from .types import MemoryRecord, RetrievedMemory
 
 SUPPORTED_MEMORY_INIT_MODES = {
@@ -121,6 +122,10 @@ class MilvusMemoryStore:
         rebuild_source_collection_name: str | None = None,
         rebuild_insert_batch_size: int = 1000,
         rebuild_embedding_batch_size: int = 256,
+        memory_text_retrieval_dedupe_similarity_threshold: float | None = None,
+        memory_text_retrieval_dedupe_prefetch_limit: int = 24,
+        memory_text_insert_dedupe_similarity_threshold: float | None = None,
+        memory_text_insert_dedupe_probe_limit: int = 40,
     ) -> None:
         self.task_name = task_name
         self.store_dir = os.path.abspath(store_dir)
@@ -138,6 +143,14 @@ class MilvusMemoryStore:
         self.rebuild_source_collection_name = rebuild_source_collection_name
         self.rebuild_insert_batch_size = max(1, int(rebuild_insert_batch_size))
         self.rebuild_embedding_batch_size = max(1, int(rebuild_embedding_batch_size))
+        self.memory_text_retrieval_dedupe_similarity_threshold = self._normalize_similarity_threshold(
+            memory_text_retrieval_dedupe_similarity_threshold
+        )
+        self.memory_text_retrieval_dedupe_prefetch_limit = max(1, int(memory_text_retrieval_dedupe_prefetch_limit or 24))
+        self.memory_text_insert_dedupe_similarity_threshold = self._normalize_similarity_threshold(
+            memory_text_insert_dedupe_similarity_threshold
+        )
+        self.memory_text_insert_dedupe_probe_limit = max(1, int(memory_text_insert_dedupe_probe_limit or 40))
         self.embedding_provider = RemoteEmbeddingProvider(
             api_url=embedding_api_url or "",
             api_key=embedding_api_key,
@@ -155,6 +168,58 @@ class MilvusMemoryStore:
         os.makedirs(self.store_dir, exist_ok=True)
         self.logger = self._build_logger()
         atexit.register(self.close)
+
+    @staticmethod
+    def _normalize_similarity_threshold(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 <= threshold <= 1.0):
+            logging.getLogger(__name__).warning(
+                "memory_text dedupe similarity threshold must be in [0, 1]; ignoring %s",
+                value,
+            )
+            return None
+        return threshold
+
+    def _task_name_filter_expr(self) -> str:
+        escaped = self.task_name.replace("\\", "\\\\").replace('"', '\\"')
+        return f'task_name == "{escaped}"'
+
+    def _scoped_search_filter_expr(self) -> str:
+        parts = [self._task_name_filter_expr()]
+        if self.only_successful:
+            parts.append("success == true")
+        return " && ".join(parts)
+
+    def _neighbor_has_similar_memory_text(
+        self,
+        client,
+        retrieve_vector: list[float],
+        memory_vec: list[float],
+        threshold: float,
+    ) -> bool:
+        results = client.search(
+            collection_name=self.collection_name,
+            data=[retrieve_vector],
+            limit=int(self.memory_text_insert_dedupe_probe_limit),
+            output_fields=["memory_text"],
+            filter=self._scoped_search_filter_expr(),
+        )
+        hits = results[0] if results else []
+        texts: list[str] = []
+        for hit in hits:
+            entity = hit.get("entity", {})
+            raw = entity.get("memory_text", "")
+            if isinstance(raw, str) and raw.strip():
+                texts.append(raw)
+        if not texts:
+            return False
+        neighbor_embeddings = self._embed_texts(texts)
+        return any(cosine_similarity_float_vectors(memory_vec, nb) >= threshold for nb in neighbor_embeddings)
 
     def initialize(self, mode: str, clean_before_init: bool = False) -> None:
         """Attach to or create the local DB and optionally load vectors from ``rebuild_source_path``.
@@ -256,11 +321,32 @@ class MilvusMemoryStore:
         if not buffered:
             return
 
-        embeddings = self._embed_texts([getattr(record, self.retrieve_key, "") for record in buffered])
-        entities = []
+        retrieve_texts = [_safe_str(getattr(record, self.retrieve_key, ""), 8192) for record in buffered]
+        embeddings = self._embed_texts(retrieve_texts)
+        insert_thr = self.memory_text_insert_dedupe_similarity_threshold
+        memory_embeddings: list[list[float]] | None = None
+        if insert_thr is not None:
+            memory_embeddings = self._embed_texts([_safe_str(record.memory_text, 8192) for record in buffered])
+
+        entities: list[dict] = []
+        batch_kept_memory_vecs: list[list[float]] = []
+        skipped_similarity = 0
+        client = self._ensure_client() if insert_thr is not None else None
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         vector_field_name = self._vector_field_name
+
         for idx, record in enumerate(buffered):
+            mem_plain = _safe_str(record.memory_text, 8192)
+            if insert_thr is not None and memory_embeddings is not None and client is not None and mem_plain.strip():
+                vec_m = memory_embeddings[idx]
+                if any(cosine_similarity_float_vectors(vec_m, kv) >= insert_thr for kv in batch_kept_memory_vecs):
+                    skipped_similarity += 1
+                    continue
+                if self._neighbor_has_similar_memory_text(client, embeddings[idx], vec_m, insert_thr):
+                    skipped_similarity += 1
+                    continue
+                batch_kept_memory_vecs.append(vec_m)
+
             entities.append(
                 {
                     "memory_id": _safe_str(record.memory_id, 128),
@@ -271,7 +357,7 @@ class MilvusMemoryStore:
                     vector_field_name: embeddings[idx],
                     "state_text": _safe_str(record.state_text, 4096),
                     "action_text": _safe_str(record.action_text, 4096),
-                    "memory_text": _safe_str(record.memory_text, 8192),
+                    "memory_text": mem_plain,
                     "reward": _safe_float(record.reward),
                     "success": bool(record.success),
                     "created_step": _safe_str(record.created_step, 64),
@@ -286,7 +372,12 @@ class MilvusMemoryStore:
             )
 
         inserted = self._insert_entities_in_batches(entities)
-        self.logger.info("add_records inserted=%s collection=%s", inserted, self.collection_name)
+        self.logger.info(
+            "add_records inserted=%s skipped_similarity=%s collection=%s",
+            inserted,
+            skipped_similarity,
+            self.collection_name,
+        )
 
     def retrieve(self, query_text: str) -> list[RetrievedMemory]:
         if not query_text:
@@ -294,10 +385,15 @@ class MilvusMemoryStore:
 
         client = self._ensure_client()
         query_vector = self._embed_texts([query_text])[0]
+        recall_thr = self.memory_text_retrieval_dedupe_similarity_threshold
+        search_limit = max(1, self.top_k)
+        if recall_thr is not None:
+            search_limit = max(search_limit, int(self.memory_text_retrieval_dedupe_prefetch_limit))
+
         search_kwargs = {
             "collection_name": self.collection_name,
             "data": [query_vector],
-            "limit": max(1, self.top_k),
+            "limit": search_limit,
             "output_fields": [
                 "memory_id",
                 "state_text",
@@ -339,15 +435,25 @@ class MilvusMemoryStore:
                     value_source=entity.get("value_source"),
                 )
             )
+        before_dedupe = len(retrieved)
+        if recall_thr is not None and len(retrieved) > 1:
+            texts_for_emb = [r.memory_text if r.memory_text.strip() else " " for r in retrieved]
+            mem_vecs = self._embed_texts(texts_for_emb)
+            keep_ix = dedupe_indices_by_embedding_similarity(mem_vecs, recall_thr)
+            retrieved = [retrieved[i] for i in keep_ix]
+        trimmed = retrieved[: max(1, self.top_k)]
         self.logger.info(
-            "retrieve collection=%s top_k=%s returned=%s min_score=%.4f query=%s",
+            "retrieve collection=%s top_k=%s returned=%s after_dedupe=%s final=%s prefetch=%s min_score=%.4f query=%s",
             self.collection_name,
             self.top_k,
+            before_dedupe,
             len(retrieved),
+            len(trimmed),
+            search_limit,
             self.min_score,
             _safe_str(query_text, 50) + "..." if len(query_text) > 50 else query_text,
         )
-        return retrieved
+        return trimmed
 
     def rebuild_from_path(self, source_path: str, source_collection_name: str | None = None) -> int:
         """Load vectors into this store from a ``.jsonl`` export or another Milvus-Lite ``.db``.

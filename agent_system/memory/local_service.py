@@ -124,7 +124,17 @@ def _spawn_config_dict(
         "clean_before_init": bool(memory_config.get("clean_before_init", False)),
         "rebuild_insert_batch_size": int(memory_config.get("rebuild_insert_batch_size") or 1000),
         "rebuild_embedding_batch_size": int(memory_config.get("rebuild_embedding_batch_size") or 256),
+        "memory_text_retrieval_dedupe_prefetch_limit": int(
+            memory_config.get("memory_text_retrieval_dedupe_prefetch_limit") or 24
+        ),
+        "memory_text_insert_dedupe_probe_limit": int(memory_config.get("memory_text_insert_dedupe_probe_limit") or 40),
     }
+    rt = memory_config.get("memory_text_retrieval_dedupe_similarity_threshold")
+    if rt is not None:
+        d["memory_text_retrieval_dedupe_similarity_threshold"] = float(rt)
+    it = memory_config.get("memory_text_insert_dedupe_similarity_threshold")
+    if it is not None:
+        d["memory_text_insert_dedupe_similarity_threshold"] = float(it)
     for key, cfg_name in [
         ("collection_name", "collection_name"),
         ("rebuild_source_path", "rebuild_source_path"),
@@ -259,6 +269,16 @@ def _build_store_from_args(args: argparse.Namespace) -> MilvusMemoryStore:
         rebuild_source_collection_name=getattr(args, "rebuild_source_collection_name", None),
         rebuild_insert_batch_size=int(getattr(args, "rebuild_insert_batch_size", 1000)),
         rebuild_embedding_batch_size=int(getattr(args, "rebuild_embedding_batch_size", 256)),
+        memory_text_retrieval_dedupe_similarity_threshold=getattr(
+            args, "memory_text_retrieval_dedupe_similarity_threshold", None
+        ),
+        memory_text_retrieval_dedupe_prefetch_limit=int(
+            getattr(args, "memory_text_retrieval_dedupe_prefetch_limit", 24) or 24
+        ),
+        memory_text_insert_dedupe_similarity_threshold=getattr(
+            args, "memory_text_insert_dedupe_similarity_threshold", None
+        ),
+        memory_text_insert_dedupe_probe_limit=int(getattr(args, "memory_text_insert_dedupe_probe_limit", 40) or 40),
     )
     store.initialize(mode=args.mode, clean_before_init=bool(getattr(args, "clean_before_init", False)))
     return store
@@ -307,6 +327,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-score", type=float, default=0.0)
     parser.add_argument("--rebuild-insert-batch-size", type=int, default=1000)
     parser.add_argument("--rebuild-embedding-batch-size", type=int, default=256)
+    parser.add_argument("--memory-text-retrieval-dedupe-similarity-threshold", type=float, default=None)
+    parser.add_argument("--memory-text-retrieval-dedupe-prefetch-limit", type=int, default=24)
+    parser.add_argument("--memory-text-insert-dedupe-similarity-threshold", type=float, default=None)
+    parser.add_argument("--memory-text-insert-dedupe-probe-limit", type=int, default=40)
     parser.add_argument("--only-successful", action="store_true")
     parser.add_argument("--clean-before-init", action="store_true")
     return parser
