@@ -1367,11 +1367,46 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_local_path)
 
         if update_latest_tracker:
-            local_latest_checkpointed_iteration = os.path.join(
-                self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
-            )
-            with open(local_latest_checkpointed_iteration, "w") as f:
-                f.write(str(self.global_steps))
+            self._write_latest_checkpoint_tracker(int(self.global_steps))
+
+    def _trainer_checkpoint_root(self) -> str:
+        root = self.config.trainer.default_local_dir
+        if not os.path.isabs(root):
+            root = os.path.join(os.getcwd(), root)
+        return os.path.abspath(root)
+
+    def _write_latest_checkpoint_tracker(self, global_step: int) -> None:
+        """Persist ``latest_checkpointed_iteration.txt`` if ``global_step`` is newer than the current tracker."""
+        root = self._trainer_checkpoint_root()
+        tracker_path = os.path.join(root, "latest_checkpointed_iteration.txt")
+        previous = -1
+        if os.path.isfile(tracker_path):
+            try:
+                previous = int(open(tracker_path, encoding="utf-8").read().strip())
+            except (ValueError, OSError):
+                previous = -1
+        if int(global_step) <= previous:
+            return
+        os.makedirs(root, exist_ok=True)
+        with open(tracker_path, "w", encoding="utf-8") as f:
+            f.write(str(int(global_step)))
+
+    def _symlink_best_val_checkpoint_for_resume(self, global_step: int, checkpoint_dir: str) -> None:
+        """Expose ``best_val/global_step_*`` at ``default_local_dir/global_step_*`` for ``find_latest_ckpt_path``."""
+        root = self._trainer_checkpoint_root()
+        step_name = f"global_step_{int(global_step)}"
+        root_step = os.path.join(root, step_name)
+        if os.path.lexists(root_step):
+            return
+        ckpt_abs = os.path.abspath(checkpoint_dir)
+        if not self._periodic_checkpoint_has_actor(ckpt_abs):
+            return
+        os.symlink(ckpt_abs, root_step, target_is_directory=True)
+        print(
+            f"best-val: symlink for resume {root_step} -> {ckpt_abs} "
+            f"(so resume_mode=auto loads this step)",
+            flush=True,
+        )
 
     def _save_checkpoint(self):
         local_global_step_folder = os.path.join(
@@ -1531,6 +1566,10 @@ class RayPPOTrainer:
                 update_latest_tracker=False,
                 hdfs_step_folder_name=None,
             )
+            # Periodic save may skip this step (e.g. save_freq does not divide global_steps); mirror under
+            # ``default_local_dir/global_step_*`` and bump the tracker so resume_mode=auto matches best-val.
+            self._symlink_best_val_checkpoint_for_resume(int(self.global_steps), target_dir)
+            self._write_latest_checkpoint_tracker(int(self.global_steps))
             out["timing_s/save_best_val_checkpoint"] = float(time.perf_counter() - t0)
             out["checkpoint/best_val_symlink"] = 0.0
 

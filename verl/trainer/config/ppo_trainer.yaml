@@ -331,7 +331,8 @@ trainer:
   n_gpus_per_node: 8
   save_freq: -1
   # When validation improves, optionally save extra checkpoints under ``default_local_dir/<save_best_val_subdir>/``.
-  # Does not affect ``latest_checkpointed_iteration.txt`` or periodic ``save_freq`` (resume still follows global_step_*).
+  # Full best-val saves (when no periodic folder exists for that step) symlink ``global_step_*`` at repo root and bump
+  # ``latest_checkpointed_iteration.txt`` so resume_mode=auto agrees with the best checkpoint.
   save_best_val_ckpt: True
   # Exact key from ``_validate()`` metric dict, e.g. ``val/text/test_score`` (depends on dataset ``data_source``).
   save_best_val_metric: null
@@ -485,7 +486,7 @@ env:
       account: null           # Slurm -A if needed
       exclude_nodes: ""       # Slurm --exclude (comma-separated hostnames)
       cpus_per_task: 4
-      mem: "64G"
+      mem: "32G"
       gres: null              # e.g. "gpu:0" if your site requires a GRES line
       apptainer_sif: ""       # e.g. /path/to/glibc_ubuntu22.sif; empty = no container (node must have new glibc)
       apptainer_binds: "/mnt:/mnt"
@@ -496,6 +497,11 @@ env:
       startup_timeout: 180    # seconds to wait for /health on the DB node
       scancel_on_close: true  # cancel Slurm job when training driver exits (atexit)
       sbatch_extra_lines: []  # extra #SBATCH lines (strings), e.g. module loads
+      # Before sbatch, query ``sinfo`` for hosts in *idle* state in this partition (after exclude_nodes).
+      # If any exist, add ``#SBATCH --nodelist=<one host>`` so the VDB lands on a node with no running jobs
+      # (reduces CPU contention with GPU-heavy jobs). If none are idle, submit without --nodelist (unchanged).
+      prefer_idle_nodes: true
+      prefer_idle_pick: random   # random | first — which idle host to pin when multiple are idle
     retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."   # Prompt suffix used in agentic retrieval mode.
     retrieval_query_open_tag: "<memory_retrieve>"   # Open tag for agentic retrieval queries.
     retrieval_query_close_tag: "</memory_retrieve>"   # Close tag for agentic retrieval queries.

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=webshop-7B
+#SBATCH --job-name=alf-7B
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=128
 #SBATCH --gpus-per-task=8

@@ -3,7 +3,7 @@
 # 差异仅为 mem_adaptor.use_actor_rollout_wg=false + 独立 model.path + resource_pool_gpus_per_node。
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.15:8265'
+export RAY_ADDRESS='http://10.140.37.13:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -12,7 +12,7 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-1.5b-cold-start-20260430/global_step_125'
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-3b-cold-start-20260430/global_step_125'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
@@ -55,7 +55,7 @@ MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需列表语法，见下方 mem_exclude_to_hydra_list
-MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-140,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-41,SH-IDC1-10-140-37-2'
+MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-55,SH-IDC1-10-140-37-91,SH-IDC1-10-140-37-13,SH-IDC1-10-140-37-38,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-15,SH-IDC1-10-140-37-43'
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -68,7 +68,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-1.5b-train_adaptor-1"
+EXPERIMENT_NAME="actor_qwen2.5-3b-train_adaptor-1"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
