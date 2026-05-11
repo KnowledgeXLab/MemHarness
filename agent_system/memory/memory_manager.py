@@ -327,7 +327,16 @@ class MemoryManager:
         clear_every = int(cfg.get("clear_every_n_global_steps") or 0)
         if clear_every > 0 and step % clear_every == 0 and step != self._last_utility_clear_step:
             t0 = time.perf_counter()
-            self.store.clear_all_records()
+            try:
+                self.store.clear_all_records()
+            except Exception as exc:
+                self._last_utility_clear_step = step
+                self._last_utility_prune_step = step
+                print(
+                    f"experience_utility: clear FAILED at global_step={step} (training continues): {exc}",
+                    flush=True,
+                )
+                return
             dt = time.perf_counter() - t0
             self._last_utility_clear_step = step
             self._last_utility_prune_step = step
@@ -344,7 +353,15 @@ class MemoryManager:
             threshold = float(cfg.get("prune_score_threshold", 0.35))
             min_uses = int(cfg.get("min_uses_before_prune", 3))
             t0 = time.perf_counter()
-            deleted = self.store.prune_low_utility_memories(threshold, min_uses)
+            try:
+                deleted = self.store.prune_low_utility_memories(threshold, min_uses)
+            except Exception as exc:
+                self._last_utility_prune_step = step
+                print(
+                    f"experience_utility: prune FAILED at global_step={step} (training continues): {exc}",
+                    flush=True,
+                )
+                return
             dt = time.perf_counter() - t0
             self._rollup_prune_deleted += int(deleted)
             self._rollup_prune_sec += float(dt)

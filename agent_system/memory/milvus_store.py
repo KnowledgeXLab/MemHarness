@@ -615,40 +615,39 @@ class MilvusMemoryStore:
         min_uses = max(0, int(min_uses))
         threshold = float(score_threshold)
         to_delete: list[str] = []
-        offset = 0
-        limit = 1000
-        while True:
-            batch = client.query(
-                collection_name=self.collection_name,
-                filter="",
-                output_fields=["memory_id", "metadata"],
-                limit=limit,
-                offset=offset,
-            )
-            if not batch:
-                break
-            for entity in batch:
-                mid = entity.get("memory_id")
-                if not mid:
-                    continue
-                meta = entity.get("metadata", {})
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except json.JSONDecodeError:
+        iterator = client.query_iterator(
+            collection_name=self.collection_name,
+            batch_size=1000,
+            limit=-1,
+            filter="",
+            output_fields=["memory_id", "metadata"],
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                for entity in batch:
+                    mid = entity.get("memory_id")
+                    if not mid:
+                        continue
+                    meta = entity.get("metadata", {})
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except json.JSONDecodeError:
+                            meta = {}
+                    if not isinstance(meta, dict):
                         meta = {}
-                if not isinstance(meta, dict):
-                    meta = {}
-                c_use = int(meta.get(UTILITY_USE_KEY, 0))
-                if c_use < min_uses:
-                    continue
-                c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
-                u_score = read_utility_score_from_metadata(meta, c_use, c_succ)
-                if u_score < threshold:
-                    to_delete.append(str(mid))
-            offset += len(batch)
-            if len(batch) < limit:
-                break
+                    c_use = int(meta.get(UTILITY_USE_KEY, 0))
+                    if c_use < min_uses:
+                        continue
+                    c_succ = int(meta.get(UTILITY_SUCC_KEY, 0))
+                    u_score = read_utility_score_from_metadata(meta, c_use, c_succ)
+                    if u_score < threshold:
+                        to_delete.append(str(mid))
+        finally:
+            iterator.close()
 
         if not to_delete:
             return 0
@@ -820,22 +819,21 @@ class MilvusMemoryStore:
             output_fields.append(vector_field_name)
 
         records: list[dict] = []
-        offset = 0
-        limit = 1000
-        while True:
-            batch = client.query(
-                collection_name=collection_name,
-                filter="",
-                output_fields=output_fields,
-                limit=limit,
-                offset=offset,
-            )
-            if not batch:
-                break
-            records.extend(batch)
-            offset += len(batch)
-            if len(batch) < limit:
-                break
+        iterator = client.query_iterator(
+            collection_name=collection_name,
+            batch_size=1000,
+            limit=-1,
+            filter="",
+            output_fields=output_fields,
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                records.extend(batch)
+        finally:
+            iterator.close()
         return records
 
     def _rebuild_from_db(self, source_db_path: str, source_collection_name: str | None = None) -> int:
