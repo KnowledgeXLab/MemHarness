@@ -343,6 +343,8 @@ trainer:
   # Requires periodic ``save_checkpoint`` to run before validation in the training loop (same ``global_steps``).
   # Warning: rotating deletes under ``max_actor_ckpt_to_keep`` can remove a periodic folder that ``best_val`` still links to.
   save_best_val_symlink_when_periodic_exists: true
+  # Skip best-val snapshots when global_steps is below this (default 1: no save on val_before_train at step 0).
+  save_best_val_min_global_step: 1
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null

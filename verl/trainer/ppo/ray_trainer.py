@@ -1483,7 +1483,11 @@ class RayPPOTrainer:
             json.dump(payload, f, indent=2)
 
     def _maybe_save_best_val_checkpoint(self, val_metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """If configured, save under ``default_local_dir/<save_best_val_subdir>/`` when validation metric is top-K."""
+        """If configured, save under ``default_local_dir/<save_best_val_subdir>/`` when validation metric is top-K.
+
+        Steps below ``trainer.save_best_val_min_global_step`` (default 1) are skipped so ``val_before_train``
+        does not persist an untrained baseline as ``best_val``.
+        """
         out: Dict[str, Any] = {}
         if not bool(self.config.trainer.get("save_best_val_ckpt", False)):
             return out
@@ -1501,6 +1505,14 @@ class RayPPOTrainer:
             return out
         max_k = int(self.config.trainer.get("save_best_val_max_to_keep", 3) or 3)
         if max_k <= 0:
+            return out
+        min_gs = int(self.config.trainer.get("save_best_val_min_global_step", 1) or 0)
+        if int(self.global_steps) < min_gs:
+            print(
+                f"best-val checkpoint: skip at global_steps={int(self.global_steps)} "
+                f"(save_best_val_min_global_step={min_gs}; avoids saving base weights before any training update).",
+                flush=True,
+            )
             return out
         if not val_metrics or metric_key not in val_metrics:
             print(

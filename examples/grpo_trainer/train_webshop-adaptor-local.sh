@@ -87,7 +87,7 @@ echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 与 run_webshop.sh 一致的占位规模（可按集群与 GRPO group 调整）
 train_data_size=18
-val_data_size=100 # webshop验证集一共500个样本，所以val_data_size要被500整除，注意不能drop last
+val_data_size=250 # webshop验证集一共500个样本，所以val_data_size要被500整除，注意不能drop last
 group_size=8
 
 DATA_MAX_PROMPT_LENGTH=6144
