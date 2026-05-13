@@ -670,14 +670,25 @@ def make_envs(config):
         return envs, val_envs
     elif "webshop" in config.env.env_name.lower():
         from agent_system.environments.env_package.webshop import build_webshop_envs, webshop_projection
-        _recipe_hgpo_dir = os.path.dirname(os.path.abspath(__file__))  # recipe/hgpo
-        _webshop_data_dir = os.path.join(_recipe_hgpo_dir, '..', '..', 'agent_system', 'environments', 'env_package', 'webshop', 'webshop', 'data')
-        if config.env.webshop.use_small:
-            file_path = os.path.join(_webshop_data_dir, 'items_shuffle_1000.json')
-            attr_path = os.path.join(_webshop_data_dir, 'items_ins_v2_1000.json')
+        ws = config.env.webshop
+        data_dir = OmegaConf.select(ws, 'data_dir', default=None)
+        if data_dir is not None and str(data_dir).strip() not in ('', '~'):
+            base = os.path.expanduser(str(data_dir))
+            if ws.use_small:
+                file_path = os.path.join(base, 'items_shuffle_1000.json')
+                attr_path = os.path.join(base, 'items_ins_v2_1000.json')
+            else:
+                file_path = os.path.join(base, 'items_shuffle.json')
+                attr_path = os.path.join(base, 'items_ins_v2.json')
         else:
-            file_path = os.path.join(_webshop_data_dir, 'items_shuffle.json')
-            attr_path = os.path.join(_webshop_data_dir, 'items_ins_v2.json')
+            _recipe_hgpo_dir = os.path.dirname(os.path.abspath(__file__))  # recipe/hgpo
+            _webshop_data_dir = os.path.join(_recipe_hgpo_dir, '..', '..', 'agent_system', 'environments', 'env_package', 'webshop', 'webshop', 'data')
+            if ws.use_small:
+                file_path = os.path.join(_webshop_data_dir, 'items_shuffle_1000.json')
+                attr_path = os.path.join(_webshop_data_dir, 'items_ins_v2_1000.json')
+            else:
+                file_path = os.path.join(_webshop_data_dir, 'items_shuffle.json')
+                attr_path = os.path.join(_webshop_data_dir, 'items_ins_v2.json')
         env_kwargs = {
                     'observation_mode': 'text', 
                     'num_products': None, 

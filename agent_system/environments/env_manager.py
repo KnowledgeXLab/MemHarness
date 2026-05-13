@@ -23,7 +23,6 @@ import ray
 from agent_system.environments.prompts import *
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SimpleMemory, SearchMemory
-from agent_system.environments.env_package.alfworld.envs import compute_reward
 from omegaconf import OmegaConf
 
 def parse_gamefile(infos):
@@ -216,6 +215,10 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
 class AlfWorldEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
+        # Deferred import: alfworld pulls gymnasium; WebShop/Search/etc. must not require it at import time.
+        from agent_system.environments.env_package.alfworld.envs import compute_reward as _compute_reward
+
+        self._compute_reward = _compute_reward
         super().__init__(envs, projection_f, config)
     
     def reset(self, kwargs):
@@ -370,7 +373,7 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
             next_text_obs[idx] = obs[0]
             self.memory[idx].append({"text_obs": self.pre_text_obs[idx], "action": actions[idx]})
             self.pre_text_obs[idx] = obs[0]
-            rewards[idx] = compute_reward(info, self.envs.multi_modal)
+            rewards[idx] = self._compute_reward(info, self.envs.multi_modal)
             dones[idx] = done_ls[0]
             env_step_mask[idx] = True
             info["is_action_valid"] = to_numpy(valids[idx])
@@ -1046,7 +1049,17 @@ def make_envs(config):
         return envs, val_envs
     elif "webshop" in config.env.env_name.lower():
         from agent_system.environments.env_package.webshop import build_webshop_envs, webshop_projection
-        if config.env.webshop.use_small:
+        ws = config.env.webshop
+        data_dir = OmegaConf.select(ws, 'data_dir', default=None)
+        if data_dir is not None and str(data_dir).strip() not in ('', '~'):
+            base = os.path.expanduser(str(data_dir))
+            if ws.use_small:
+                file_path = os.path.join(base, 'items_shuffle_1000.json')
+                attr_path = os.path.join(base, 'items_ins_v2_1000.json')
+            else:
+                file_path = os.path.join(base, 'items_shuffle.json')
+                attr_path = os.path.join(base, 'items_ins_v2.json')
+        elif ws.use_small:
             file_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_shuffle_1000.json')
             attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2_1000.json')
         else:

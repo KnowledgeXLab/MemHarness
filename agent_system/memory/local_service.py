@@ -233,7 +233,9 @@ def start_local_memory_server(memory_config, task_name: str):
                 f"Local memory server exited early with code {process.returncode}. Check log: {log_path}"
             )
         try:
-            response = requests.get(health_url, timeout=2)
+            with requests.Session() as sess:
+                sess.trust_env = False
+                response = sess.get(health_url, timeout=2)
             if response.status_code == HTTPStatus.OK:
                 return LocalMemoryServerHandle(process=process, base_url=base_url, log_path=log_path)
         except requests.RequestException as exc:

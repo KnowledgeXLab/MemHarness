@@ -17,6 +17,16 @@ from omegaconf import DictConfig, OmegaConf
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+def _append_vdb_probe_log(memory_dir: str, line: str) -> None:
+    """Append one line to a local file for health-check diagnostics (TrainRunner side)."""
+    path = os.path.join(memory_dir, "vdb_health_probe.log")
+    try:
+        with open(path, "a", encoding="utf-8") as fp:
+            fp.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except OSError:
+        pass
+
+
 def _as_plain_dict(memory_config: DictConfig) -> dict[str, Any]:
     if OmegaConf.is_config(memory_config):
         return OmegaConf.to_container(memory_config, resolve=True)
@@ -180,10 +190,26 @@ def start_memory_vdb_on_slurm_node(
     deadline = time.time() + max(1, int(rl.get("startup_timeout") or startup_timeout))
     health_ok = False
     base_url = ""
-    last_err = None
+    last_err: str | BaseException | None = None
 
+    probe_log = os.path.join(memory_dir, "vdb_health_probe.log")
+    try:
+        with open(probe_log, "w", encoding="utf-8") as fp:
+            fp.write(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} sbatch_ok job_id={job_id} "
+                f"port={port} timeout_s={max(1, int(rl.get('startup_timeout') or startup_timeout))}\n"
+            )
+            fp.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} probe_log={probe_log}\n")
+    except OSError:
+        pass
+
+    last_no_ip_log = 0.0
     while time.time() < deadline:
         if not os.path.isfile(ip_file):
+            now = time.time()
+            if now - last_no_ip_log >= 10.0:
+                _append_vdb_probe_log(memory_dir, f"wait vdb_node_ip.txt (not present yet) job_id={job_id}")
+                last_no_ip_log = now
             time.sleep(1)
             continue
         try:
@@ -196,13 +222,22 @@ def start_memory_vdb_on_slurm_node(
             time.sleep(1)
             continue
         base_url = f"http://{node_ip}:{port}"
+        health_url = f"{base_url}/health"
         try:
-            r = requests.get(f"{base_url}/health", timeout=3)
+            # Bypass HTTP(S)_PROXY: cluster compute IPs must not go through Squid (often HTTP 403).
+            with requests.Session() as sess:
+                sess.trust_env = False
+                r = sess.get(health_url, timeout=3)
             if r.status_code == 200:
                 health_ok = True
+                _append_vdb_probe_log(memory_dir, f"OK GET {health_url} -> 200")
                 break
+            snippet = (r.text or "")[:200].replace("\n", " ")
+            last_err = f"HTTP {r.status_code} from {health_url} body_prefix={snippet!r}"
+            _append_vdb_probe_log(memory_dir, last_err)
         except requests.RequestException as exc:
             last_err = exc
+            _append_vdb_probe_log(memory_dir, f"GET {health_url} failed: {type(exc).__name__}: {exc}")
         try:
             sq = subprocess.run(
                 ["squeue", "-j", job_id, "-h"],
@@ -222,10 +257,12 @@ def start_memory_vdb_on_slurm_node(
     if not health_ok:
         if scancel_on_close:
             subprocess.run(["scancel", job_id], capture_output=True)
-        raise RuntimeError(
+        hint = (
             f"Timed out waiting for remote memory VDB at expected URL (port {port}). "
-            f"Last error: {last_err}. Logs under {memory_dir}. Job id: {job_id}"
+            f"Last error: {last_err!s}. Probe log: {probe_log}. "
+            f"Slurm logs: {memory_dir}/slurm_vdb-*.out .err. Job id: {job_id}"
         )
+        raise RuntimeError(hint)
 
     from .local_service import LocalMemoryServerHandle
 

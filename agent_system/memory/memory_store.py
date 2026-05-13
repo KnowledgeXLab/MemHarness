@@ -84,6 +84,9 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         self.only_successful = only_successful
         self.top_k = top_k
         self.min_score = min_score
+        # Do not use HTTP(S)_PROXY for cluster-local VDB IPs (Squid often returns 403).
+        self._http = requests.Session()
+        self._http.trust_env = False
 
     def initialize(self, mode: str, clean_before_init: bool = False) -> None:
         del mode, clean_before_init
@@ -93,7 +96,7 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         if not buffered:
             return
 
-        response = requests.post(
+        response = self._http.post(
             f"{self.base_url}/memories/batch",
             json={"items": [record.to_dict() for record in buffered]},
             timeout=self.timeout,
@@ -104,7 +107,7 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         if not query_text:
             return []
 
-        response = requests.post(
+        response = self._http.post(
             f"{self.base_url}/memories/search",
             json={
                 "query": query_text,
@@ -130,7 +133,7 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         if not buffered_updates:
             return 0
 
-        response = requests.post(
+        response = self._http.post(
             f"{self.base_url}/memories/update",
             json={"updates": buffered_updates},
             timeout=self.timeout,
@@ -140,7 +143,7 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         return int(payload.get("updated", 0)) if isinstance(payload, dict) else 0
 
     def prune_low_utility_memories(self, score_threshold: float, min_uses: int) -> int:
-        response = requests.post(
+        response = self._http.post(
             f"{self.base_url}/memories/prune",
             json={"score_threshold": float(score_threshold), "min_uses": int(min_uses)},
             timeout=self.timeout,
@@ -150,12 +153,12 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
         return int(payload.get("deleted", 0)) if isinstance(payload, dict) else 0
 
     def clear_all_records(self) -> None:
-        response = requests.post(f"{self.base_url}/memories/clear", json={}, timeout=self.timeout)
+        response = self._http.post(f"{self.base_url}/memories/clear", json={}, timeout=self.timeout)
         response.raise_for_status()
 
     def count_records(self) -> int:
         try:
-            response = requests.get(f"{self.base_url}/memories/count", timeout=self.timeout)
+            response = self._http.get(f"{self.base_url}/memories/count", timeout=self.timeout)
             response.raise_for_status()
             payload = response.json()
             if isinstance(payload, dict) and "count" in payload:

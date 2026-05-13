@@ -1,3 +1,5 @@
+# typer>=0.12 uses click.Choice[T]; needs click>=8.2. Ray 2.5x + click 8.3+ breaks ray CLI (deepcopy Sentinel).
+click>=8.2,<8.3
 beautifulsoup4==4.11.1
 cleantext==1.1.4
 env==0.1.0

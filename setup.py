@@ -34,7 +34,10 @@ install_requires = [
     "numpy",
     "pandas",
     "peft",
-    "pyarrow>=19.0.0",
+    # pyarrow>=21 wheels require newer manylinux (glibc); CentOS 7 / manylinux2014 stays on 20.x.
+    "pyarrow>=19.0.0,<21",
+    # PyAV 15+ has no manylinux2014 wheels; sdist needs FFmpeg dev headers newer than CentOS 7's.
+    "av>=12.0.0,<=14.2.0",
     "pybind11",
     "pylatexenc",
     "ray[default]>=2.41.0,<=2.50.0",

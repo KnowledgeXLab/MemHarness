@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# MemAdaptor + AlfWorld：Reasoning（7B）与 MemAdaptor（例：0.5B）分池； train_alfworld-adaptor-same.sh 的 GRPO recipe 对齐，
-# 差异仅为 mem_adaptor.use_actor_rollout_wg=false + 独立 model.path + resource_pool_gpus_per_node。
 set -x
 set -euo pipefail
 export RAY_ADDRESS='http://10.140.37.13:8265'
@@ -12,7 +10,7 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-3b-cold-start-20260430/global_step_125'
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-3b-cold-start-20260430/global_step_125'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
@@ -81,7 +79,7 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
-TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
@@ -98,10 +96,10 @@ val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batc
 group_size=8
 
 # 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
-# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
-DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
-DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
-SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。  
+DATA_MAX_PROMPT_LENGTH=2048
+DATA_MAX_RESPONSE_LENGTH=512
+SUMMARIZER_MAX_PROMPT_TOKENS=12288
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
 if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
   ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))

@@ -292,9 +292,20 @@ class DataProto:
         import io
 
         buffer = io.BytesIO()
-        if version.parse(tensordict.__version__) >= version.parse("0.5.0") and self.batch is not None:
-            self.batch = self.batch.contiguous()
-            self.batch = self.batch.consolidate()
+        if self.batch is not None:
+            # Some tensordict builds expose __version__ as None → version.parse blows up during Ray pickle.
+            td_ver_raw = getattr(tensordict, "__version__", None)
+            use_consolidate = False
+            if td_ver_raw is not None:
+                try:
+                    use_consolidate = version.parse(str(td_ver_raw)) >= version.parse("0.5.0")
+                except (TypeError, ValueError):
+                    use_consolidate = hasattr(self.batch, "consolidate")
+            else:
+                use_consolidate = hasattr(self.batch, "consolidate")
+            if use_consolidate:
+                self.batch = self.batch.contiguous()
+                self.batch = self.batch.consolidate()
         torch.save(self.batch, buffer)
         buffer_bytes = buffer.getvalue()
         return buffer_bytes, self.non_tensor_batch, self.meta_info

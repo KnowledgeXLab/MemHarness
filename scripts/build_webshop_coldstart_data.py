@@ -479,12 +479,18 @@ def build_messages_for_episode(
                             "Focus on the immediate decision bottleneck (search vs click vs buy), not generic browsing.\n\n"
                             "Write only the retrieval query text."
                         )
-                        query_text = llm.chat_completion(
-                            [
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ]
-                        )
+                        try:
+                            query_text = llm.chat_completion(
+                                [
+                                    {"role": "system", "content": sys_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ]
+                            )
+                        except Exception as e:
+                            raise ValueError(
+                                f"retrieve LLM failed (skipping episode): item_id={item_id!r} "
+                                f"source_step={memory_turn_idx}: {type(e).__name__}: {e}"
+                            ) from e
                         stats["llm_queries"] += 1
                         if sleep_between_llm_sec > 0:
                             time.sleep(sleep_between_llm_sec)

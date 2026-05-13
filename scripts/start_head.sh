@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=alf-7B
+#SBATCH --job-name=webshop-7B-1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=128
 #SBATCH --gpus-per-task=8
@@ -14,7 +14,7 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 source ~/switch_cuda.sh 12.4
 nvcc --version
 eval "$(/mnt/petrelfs/wurong/miniconda3/bin/conda shell.bash hook)"
-conda activate verl-agent # 记得改成自己的
+conda activate verl-agent-webshop
 conda info
 
 

@@ -320,11 +320,12 @@ class TrajectoryCollector:
 
     def vanilla_multi_turn_loop(
             self,
-            gen_batch: DataProto, 
-            actor_rollout_wg, 
+            gen_batch: DataProto,
+            actor_rollout_wg,
             envs: EnvironmentManagerBase,
             adaptor_rollout_wg=None,
             trainer_global_step=None,
+            is_train: bool = True,
             ) -> DataProto:
         """
         Collects trajectories through parallel agent-environment agent_loop.
@@ -578,19 +579,22 @@ class TrajectoryCollector:
         t_after_success = time.perf_counter()
         timing["success_evaluator"] += t_after_success - t_post_loop
 
-        envs.maybe_write_rollout_memories(
-            config=self.config,
-            tokenizer=self.tokenizer,
-            actor_rollout_wg=actor_rollout_wg,
-            total_batch_list=total_batch_list,
-            total_infos=total_infos,
-            episode_rewards=episode_rewards,
-            episode_lengths=episode_lengths,
-            success=success,
-            traj_uid=traj_uid,
-            trainer_global_step=trainer_global_step,
-            grpo_group_uid=uid_batch,
-        )
+        # Avoid writing summarized trajectories from validation/test into the training memory store
+        # (would leak eval tasks into retrieval for subsequent training steps).
+        if is_train:
+            envs.maybe_write_rollout_memories(
+                config=self.config,
+                tokenizer=self.tokenizer,
+                actor_rollout_wg=actor_rollout_wg,
+                total_batch_list=total_batch_list,
+                total_infos=total_infos,
+                episode_rewards=episode_rewards,
+                episode_lengths=episode_lengths,
+                success=success,
+                traj_uid=traj_uid,
+                trainer_global_step=trainer_global_step,
+                grpo_group_uid=uid_batch,
+            )
         timing["maybe_write_rollout_memories"] += time.perf_counter() - t_after_success
 
         self._rollout_timing_breakdown = timing
@@ -647,6 +651,7 @@ class TrajectoryCollector:
                 envs=envs,
                 adaptor_rollout_wg=adaptor_rollout_wg,
                 trainer_global_step=trainer_global_step,
+                is_train=True,
             )
             for _k, _v in getattr(self, "_rollout_timing_breakdown", {}).items():
                 timing_acc[_k] += float(_v)
@@ -732,6 +737,7 @@ class TrajectoryCollector:
                 envs=envs,
                 adaptor_rollout_wg=adaptor_rollout_wg,
                 trainer_global_step=trainer_global_step,
+                is_train=is_train,
             )
         assert len(total_batch_list) == len(total_episode_rewards)
         assert len(total_batch_list) == len(total_episode_lengths)

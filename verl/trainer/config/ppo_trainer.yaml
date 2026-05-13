@@ -12,7 +12,7 @@ data:
   train_drop_last: true
   val_batch_size: null
   # If true, drop the last incomplete validation batch. Use when val env worker count (val_batch_size) must match
-  # every batch (e.g. AlfWorld); you lose up to (val_batch_size - 1) episodes at most.
+  # every batch (e.g. AlfWorld, WebShop Ray vector env); you lose up to (val_batch_size - 1) episodes at most.
   val_drop_last: false
   return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
   return_raw_chat: False
@@ -532,6 +532,9 @@ env:
   webshop:
     use_small: True
     human_goals: False
+    # Optional directory (absolute recommended) with the same JSON filenames as vendored webshop/data/
+    # (items_shuffle[_1000].json, items_ins_v2[_1000].json). Null → use paths under the repo.
+    data_dir: null
 
 # Memory Adaptor (inference hook): batched generate via WorkerGroup; see agent_system/memory/mem_adaptor_rollout.py
 # Recommended with env.memory.retrieval_mode=agentic so infos carry memory_event (retrieved list).

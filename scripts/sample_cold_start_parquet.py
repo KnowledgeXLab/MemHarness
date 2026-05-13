@@ -61,10 +61,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--input",
-        default="data/MemAdaptor/cold_start/20260429.parquet",
+        default="data/MemAdaptor/cold_start/webshop/20260511.parquet",
         help="Source parquet path.",
     )
-    p.add_argument("--n", type=int, default=1000, help="Number of rows to sample (capped by dataset size).")
+    p.add_argument("--n", type=int, default=1100, help="Number of rows to sample (capped by dataset size).")
     p.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility.")
     p.add_argument(
         "--out-prefix",
@@ -78,7 +78,7 @@ def main() -> int:
     p.add_argument(
         "--val-n",
         type=int,
-        default=0,
+        default=100,
         help=(
             "If >0, reserve this many rows as validation after sampling (disjoint from train). "
             "Requires n > val-n. Outputs *_train.parquet/jsonl and *_val.parquet/jsonl."
