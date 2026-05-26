@@ -30,18 +30,20 @@ mkdir -p "${REPO_ROOT}/logs/cold_start"
 
 export HYDRA_FULL_ERROR="1"
 
-export EXP_NAME="webshop-qwen2.5-3b-cold-start-20260511"
+export TASK="webshop"
+
+export EXP_NAME="${TASK}-qwen2.5-7b-cold-start-20260519"
 
 # 本地仓库需放在 PYTHONPATH，否则可能找不到 verl / 项目包
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 # ---------- 数据与模型 ----------
-TRAIN_FILES="data/MemAdaptor/cold_start/webshop/20260511_sample1000_seed42_train.parquet"
-VAL_FILES="data/MemAdaptor/cold_start/webshop/20260511_sample100_seed42_val.parquet"
-MODEL_ID="models/public_models/Qwen2.5-3B-Instruct"
+TRAIN_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_agent_summarizer_20260519/train.parquet"
+VAL_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_agent_summarizer_20260519/val.parquet"
+MODEL_ID="models/public_models/Qwen2.5-7B-Instruct"
 
 # 避免多次实验共写一个目录互相覆盖；可按需改成含 SLURM_JOB_ID
-SAVE_ROOT="models/save_models/mem_adaptor/cold_start/webshop/${EXP_NAME}"
+SAVE_ROOT="models/save_models/mem_adaptor/cold_start/${TASK}/${EXP_NAME}"
 mkdir -p "${SAVE_ROOT}"
 
 # ---------- 日志----------
@@ -79,7 +81,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   optim.warmup_steps_ratio=0.1 \
   optim.lr_scheduler='cosine' \
   trainer.default_local_dir="${SAVE_ROOT}" \
-  trainer.project_name=memadaptor-cold-start \
+  trainer.project_name=memadaptor-cold-start-${TASK} \
   trainer.experiment_name="${EXP_NAME}" \
   trainer.logger=['wandb','console'] \
   trainer.total_epochs=2 \

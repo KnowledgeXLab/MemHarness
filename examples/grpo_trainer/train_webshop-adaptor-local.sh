@@ -2,7 +2,7 @@
 set -x
 set -euo pipefail
 
-export RAY_ADDRESS='http://10.140.37.71:8265'
+export RAY_ADDRESS='http://10.140.37.55:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -11,7 +11,8 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # Reasoning actor（主策略）
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260511/global_step_125'
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260519/global_step_250'
+# REASONING_MODEL_PATH='models/public_models/Qwen2.5-1.5B-Instruct'
 # MemAdaptor 专用池模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
@@ -42,13 +43,13 @@ EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic"
 RETRIEVE_KEY="memory_text"
 
-EMBEDDING_API_URL="http://10.140.37.140:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM="True"
-MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
-MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-55,SH-IDC1-10-140-37-91,SH-IDC1-10-140-37-13,SH-IDC1-10-140-37-38,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-15,SH-IDC1-10-140-37-43,SH-IDC1-10-140-37-2'
+MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
+MEMORY_REMOTE_SERVER_PORT="8768"
+MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 # Slurm 上跑 Milvus FastAPI 的 conda（须含 pymilvus、embedding 依赖）；可与本地提交的 verl-agent-webshop 不同。
@@ -61,7 +62,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-7b-webshop_train_adaptor-1"
+EXPERIMENT_NAME="actor_qwen2.5-7b-cold-start-20260519_epoch2-webshop_train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -261,6 +262,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
     env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
     env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
+    env.memory.experience_summarizer.summarizer_trajectory_min_turns_kept=4 \
     env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
     env.memory.retrieve_key="${RETRIEVE_KEY}" \
     "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
@@ -284,6 +286,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
     trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.val_only=False \
     "$@"

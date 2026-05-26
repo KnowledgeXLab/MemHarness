@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.13:8265'
+export RAY_ADDRESS='http://10.140.37.63:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -10,7 +10,8 @@ export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
 # REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-3b-cold-start-20260430/global_step_125'
+# REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 
@@ -36,7 +37,6 @@ export WANDB_DIR='wandb_logs'
 num_cpus_per_env_worker=0.1
 
 TASK_NAME="alfworld"
-
 MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
@@ -46,14 +46,14 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.140:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
-MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
-MEMORY_REMOTE_SERVER_PORT="8765"
+MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
+MEMORY_REMOTE_SERVER_PORT="8767"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需列表语法，见下方 mem_exclude_to_hydra_list
-MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-55,SH-IDC1-10-140-37-91,SH-IDC1-10-140-37-13,SH-IDC1-10-140-37-38,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-15,SH-IDC1-10-140-37-43'
+MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -66,7 +66,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-3b-train_adaptor-1"
+EXPERIMENT_NAME="actor_qwen2.5-7b-cold-start-20260519_epoch1-train_adaptor"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -119,10 +119,14 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
+  --overwrite \
   --alfworld_eval_split eval_in_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 MEMORY_CLI=()
+# ALFWorld 任务对环境细节非常敏感，关闭 dedupe 防止相似但不同的记忆被错误去重
+MEMORY_CLI+=(env.memory.memory_text_retrieval_dedupe_similarity_threshold=null)
+MEMORY_CLI+=(env.memory.memory_text_insert_dedupe_similarity_threshold=null)
 if [ -n "${MEMORY_REBUILD_SOURCE_PATH}" ]; then
   MEMORY_CLI+=(env.memory.rebuild_source_path="${MEMORY_REBUILD_SOURCE_PATH}")
 fi

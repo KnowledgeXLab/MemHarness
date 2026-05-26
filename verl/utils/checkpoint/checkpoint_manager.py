@@ -132,7 +132,7 @@ class BaseCheckpointManager:
             torch.npu.set_rng_state(rng_state["npu"])
 
 
-def find_latest_ckpt_path(path, directory_format="global_step_{}"):
+def find_latest_ckpt_path(path, directory_format="global_step_{}", best_val_subdir: Optional[str] = None):
     """
     Return the most recent checkpoint directory based on a tracker file.
 
@@ -140,6 +140,9 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
         path (str): Base directory containing the checkpoint tracker.
         directory_format (str): Template for checkpoint subfolders with one
             placeholder for the iteration number (default "global_step_{}").
+        best_val_subdir (str, optional): When the tracker step folder is missing
+            under ``path``, try ``path/<best_val_subdir>/global_step_<N>`` before
+            giving up (e.g. periodic ckpt removed but best-val copy kept).
 
     Returns:
         str or None: Full path to the latest checkpoint directory, or
@@ -150,18 +153,29 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
 
     tracker_file = get_checkpoint_tracker_filename(path)
     if not os.path.exists(tracker_file):
-        print("Checkpoint tracker file does not exist: %s", tracker_file)
+        print(f"Checkpoint tracker file does not exist: {tracker_file}")
         return None
 
     with open(tracker_file, "rb") as f:
         iteration = int(f.read().decode())
-    ckpt_path = os.path.join(path, directory_format.format(iteration))
-    if not os.path.exists(ckpt_path):
-        print("Checkpoint does not exist: %s", ckpt_path)
-        return None
+    step_name = directory_format.format(iteration)
+    ckpt_path = os.path.join(path, step_name)
+    if os.path.exists(ckpt_path):
+        print(f"Found checkpoint: {ckpt_path}")
+        return ckpt_path
 
-    print("Found checkpoint: %s", ckpt_path)
-    return ckpt_path
+    print(f"Checkpoint does not exist: {ckpt_path}")
+    if best_val_subdir:
+        best_val_ckpt = os.path.join(path, best_val_subdir, step_name)
+        if os.path.exists(best_val_ckpt):
+            print(
+                f"Found checkpoint in {best_val_subdir}: {best_val_ckpt} "
+                f"(tracker step {iteration} missing under {path})",
+            )
+            return best_val_ckpt
+        print(f"Checkpoint does not exist in {best_val_subdir}: {best_val_ckpt}")
+
+    return None
 
 
 def get_checkpoint_tracker_filename(root_path: str):

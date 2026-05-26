@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.15:8265'
+export RAY_ADDRESS='http://10.140.37.64:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -11,14 +11,15 @@ export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
 # MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-# MODEL_PATH='models/save_models/mem_adaptor/cold_start/qwen2.5-1.5b-cold-start-20260430/global_step_125'
-MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
+MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
+# MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
 
 # --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数
-trainer_n_gpus_per_node=4
+trainer_n_gpus_per_node=8
 GPU_NUM="${trainer_n_gpus_per_node}"
 # MemAdaptor GPU：仅当 mem_adaptor.use_actor_rollout_wg=false 时，main_ppo 才会注册 mem_adaptor_pool 并占用
 # mem_adaptor.resource_pool_gpus_per_node（见 verl/trainer/main_ppo.py::_mem_adaptor_dedicated_rollout_wg）。
@@ -49,14 +50,14 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 
 RETRIEVE_KEY="memory_text"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.140:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
-MEMORY_REMOTE_PARTITION="DataFrontier_Explore"
-MEMORY_REMOTE_SERVER_PORT="8765"
+MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
+MEMORY_REMOTE_SERVER_PORT="8766"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
-MEMORY_REMOTE_EXCLUDE_NODES='SH-IDC1-10-140-37-140,SH-IDC1-10-140-37-8,SH-IDC1-10-140-37-17,SH-IDC1-10-140-37-2'
+MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
 MEMORY_REMOTE_CONDA_ENV="verl-agent"
@@ -69,7 +70,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-1.5B-cold_start_20260430_epoch1"
+EXPERIMENT_NAME="train_adaptor-same-7B-cold_start_20260519_epoch1-1"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -99,8 +100,8 @@ group_size=8
 
 # 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
 # （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
-DATA_MAX_PROMPT_LENGTH="${DATA_MAX_PROMPT_LENGTH:-2048}"
-DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH:-512}"
+DATA_MAX_PROMPT_LENGTH=2048
+DATA_MAX_RESPONSE_LENGTH=512
 SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
 if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
@@ -121,10 +122,14 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
+  --overwrite \
   --alfworld_eval_split eval_in_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 MEMORY_CLI=()
+# ALFWorld 任务对环境细节非常敏感，关闭 dedupe 防止相似但不同的记忆被错误去重
+MEMORY_CLI+=(env.memory.memory_text_retrieval_dedupe_similarity_threshold=null)
+MEMORY_CLI+=(env.memory.memory_text_insert_dedupe_similarity_threshold=null)
 if [ -n "${MEMORY_REBUILD_SOURCE_PATH}" ]; then
   MEMORY_CLI+=(env.memory.rebuild_source_path="${MEMORY_REBUILD_SOURCE_PATH}")
 fi
@@ -278,6 +283,9 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
       trainer.nnodes=1 \
       trainer.save_freq=50 \
+      trainer.save_best_val_ckpt=True \
+      trainer.save_best_val_mode="max" \
+      trainer.save_best_val_metric="val/success_rate" \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \

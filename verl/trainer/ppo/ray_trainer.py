@@ -1631,7 +1631,15 @@ class RayPPOTrainer:
             if not os.path.isabs(checkpoint_folder):
                 working_dir = os.getcwd()
                 checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+            best_val_subdir = None
+            if bool(self.config.trainer.get("save_best_val_ckpt", False)):
+                sub = str(self.config.trainer.get("save_best_val_subdir", "best_val") or "best_val").strip()
+                if sub:
+                    best_val_subdir = sub
+            global_step_folder = find_latest_ckpt_path(
+                checkpoint_folder,
+                best_val_subdir=best_val_subdir,
+            )  # None if no latest
 
         # find global_step_folder
         if self.config.trainer.resume_mode == "auto":
