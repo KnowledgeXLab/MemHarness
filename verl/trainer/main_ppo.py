@@ -70,6 +70,17 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
                 ref.model.use_shm = shm
         with open_dict(ref.actor):
             ref.actor.trainable = train_ma
+            if ma.get("actor_use_kl_loss") is not None:
+                ref.actor.use_kl_loss = bool(ma.get("actor_use_kl_loss"))
+            if ma.get("actor_kl_loss_coef") is not None:
+                ref.actor.kl_loss_coef = float(ma.get("actor_kl_loss_coef"))
+            if ma.get("actor_kl_loss_type") is not None:
+                ref.actor.kl_loss_type = str(ma.get("actor_kl_loss_type"))
+        if ma.get("ref_param_offload") is not None:
+            with open_dict(ref):
+                with open_dict(ref.ref):
+                    with open_dict(ref.ref.fsdp_config):
+                        ref.ref.fsdp_config.param_offload = bool(ma.get("ref_param_offload"))
         # Dedicated adaptor WG must run hf/vllm for FSDP log-prob / vLLM generate; do not inherit openai_api.
         with open_dict(ref.rollout):
             if str(ref.rollout.name) == "openai_api":

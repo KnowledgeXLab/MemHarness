@@ -266,10 +266,10 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       mem_adaptor.train_memory_adaptor=true \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
       "${MEM_ADAPTOR_REF_CLI[@]+"${MEM_ADAPTOR_REF_CLI[@]}"}" \
-      mem_adaptor.actor_rollout_ref.actor.use_kl_loss=true \
-      mem_adaptor.actor_rollout_ref.actor.kl_loss_coef=0.01 \
-      mem_adaptor.actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-      mem_adaptor.actor_rollout_ref.ref.fsdp_config.param_offload=true \
+      mem_adaptor.actor_use_kl_loss=true \
+      mem_adaptor.actor_kl_loss_coef=0.01 \
+      mem_adaptor.actor_kl_loss_type=low_var_kl \
+      mem_adaptor.ref_param_offload=true \
       mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
       mem_adaptor.max_new_tokens=128 \
       mem_adaptor.grpo_english_shaping.penalty=1.0 \

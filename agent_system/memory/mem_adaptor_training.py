@@ -223,10 +223,15 @@ def train_memory_adaptor_enabled(config: DictConfig) -> bool:
 
 
 def mem_adaptor_kl_loss_enabled(config: DictConfig) -> bool:
-    """True when dedicated adaptor GRPO should use ``actor.use_kl_loss`` against a frozen ref worker."""
+    """True when dedicated adaptor GRPO should use KL loss against a frozen ref worker."""
     if not train_memory_adaptor_enabled(config):
         return False
-    amref = OmegaConf.select(config, "mem_adaptor.actor_rollout_ref")
+    ma = OmegaConf.select(config, "mem_adaptor")
+    if ma is None:
+        return False
+    if ma.get("actor_use_kl_loss") is not None:
+        return bool(ma.get("actor_use_kl_loss"))
+    amref = OmegaConf.select(ma, "actor_rollout_ref")
     if amref is None:
         return False
     return bool(OmegaConf.select(amref, "actor.use_kl_loss", default=False))
