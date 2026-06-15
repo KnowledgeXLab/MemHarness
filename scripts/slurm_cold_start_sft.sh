@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=mem-cold-sft
+#SBATCH --job-name=alf-sft-3b
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gpus-per-task=4
+#SBATCH --cpus-per-task=32
+#SBATCH --gpus-per-task=2
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --output=logs/cold_start/%x-%j.out
 #SBATCH --error=logs/cold_start/%x-%j.err
@@ -30,9 +30,9 @@ mkdir -p "${REPO_ROOT}/logs/cold_start"
 
 export HYDRA_FULL_ERROR="1"
 
-export TASK="webshop"
+export TASK="alfworld"
 
-export EXP_NAME="${TASK}-qwen2.5-7b-cold-start-20260519"
+export EXP_NAME="${TASK}-qwen2.5-3b-cold-start-20260519"
 
 # 本地仓库需放在 PYTHONPATH，否则可能找不到 verl / 项目包
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
@@ -40,7 +40,7 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 # ---------- 数据与模型 ----------
 TRAIN_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_agent_summarizer_20260519/train.parquet"
 VAL_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_agent_summarizer_20260519/val.parquet"
-MODEL_ID="models/public_models/Qwen2.5-7B-Instruct"
+MODEL_ID="models/public_models/Qwen2.5-3B-Instruct"
 
 # 避免多次实验共写一个目录互相覆盖；可按需改成含 SLURM_JOB_ID
 SAVE_ROOT="models/save_models/mem_adaptor/cold_start/${TASK}/${EXP_NAME}"
@@ -72,7 +72,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   data.multiturn.enable=true \
   data.multiturn.messages_key=messages \
   data.train_batch_size=8 \
-  data.micro_batch_size_per_gpu=4 \
+  data.micro_batch_size_per_gpu=2 \
   data.max_length=8192 \
   data.truncation=right \
   model.partial_pretrain="${MODEL_ID}" \

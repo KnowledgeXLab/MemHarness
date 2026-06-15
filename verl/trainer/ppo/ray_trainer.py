@@ -70,6 +70,8 @@ from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 from agent_system.memory.mem_adaptor_training import (
     build_memory_adaptor_grpo_batch,
     format_mem_adaptor_training_sample_for_log,
+    mem_adaptor_kl_loss_enabled,
+    mem_adaptor_ref_actor_rollout_config,
     mem_adaptor_rollout_diag_metrics,
     pad_mem_adaptor_batch_for_dp,
     prepare_adaptor_batch_for_rl,
@@ -445,6 +447,7 @@ class RayPPOTrainer:
         self.traj_collector = traj_collector
         # Set in init_workers when Role.MemAdaptorRollout is registered (mem_adaptor.use_actor_rollout_wg=false).
         self.adaptor_rollout_wg = None
+        self.adaptor_ref_wg = None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1253,6 +1256,13 @@ class RayPPOTrainer:
                 role="actor_rollout",
             )
             self.resource_pool_to_cls[resource_pool]["adaptor_rollout"] = adaptor_rollout_cls
+            if mem_adaptor_kl_loss_enabled(self.config):
+                adaptor_ref_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.MemAdaptorRollout],
+                    config=mem_adaptor_ref_actor_rollout_config(self.config),
+                    role="ref",
+                )
+                self.resource_pool_to_cls[resource_pool]["adaptor_ref"] = adaptor_ref_cls
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -1285,6 +1295,9 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+        self.adaptor_ref_wg = all_wg.get("adaptor_ref")
+        if self.adaptor_ref_wg is not None:
+            self.adaptor_ref_wg.init_model()
         self.adaptor_rollout_wg = all_wg.get("adaptor_rollout")
         if self.adaptor_rollout_wg is not None:
             self.adaptor_rollout_wg.init_model()
@@ -1890,6 +1903,13 @@ class RayPPOTrainer:
                                         ma_olp_pad.batch.pop("entropys", None)
                                         ma_olp = unpad_dataproto(ma_olp_pad, ma_lp_pad)
                                         ma_batch = ma_batch.union(ma_olp)
+                                    if self.adaptor_ref_wg is not None:
+                                        with _timer("mem_adaptor_ref", timing_raw):
+                                            ma_ws = int(self.adaptor_ref_wg.world_size)
+                                            ma_ref_in, ma_ref_pad = pad_mem_adaptor_batch_for_dp(ma_batch, ma_ws)
+                                            ma_ref_lp_pad = self.adaptor_ref_wg.compute_ref_log_prob(ma_ref_in)
+                                            ma_ref_lp = unpad_dataproto(ma_ref_lp_pad, pad_size=ma_ref_pad)
+                                            ma_batch = ma_batch.union(ma_ref_lp)
                                     ma_batch.batch["token_level_rewards"] = ma_batch.batch["token_level_scores"]
                                     norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
                                     ma_batch = compute_advantage(

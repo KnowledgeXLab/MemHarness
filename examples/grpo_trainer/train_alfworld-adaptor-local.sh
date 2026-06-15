@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.63:8265'
+export RAY_ADDRESS='http://10.140.37.29:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -11,9 +11,11 @@ export WANDB_MODE="offline"
 
 # REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
+# 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
+MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 
 # --- 与 train_alfworld-adaptor-same 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
@@ -46,12 +48,12 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
 RETRIEVE_KEY="memory_text" # memory_text | state_text
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.50:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
-MEMORY_REMOTE_SERVER_PORT="8767"
+MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需列表语法，见下方 mem_exclude_to_hydra_list
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
@@ -66,7 +68,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-7b-cold-start-20260519_epoch1-train_adaptor"
+EXPERIMENT_NAME="actor_qwen2.5-1.5b-cold-start-20260519_epoch1-train_adaptor-kl_ref"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -88,6 +90,11 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REASONING_MODEL_PATH=${REASONING_MODEL_PATH}"
 echo "[log] MEM_ADAPTOR_MODEL_PATH=${MEM_ADAPTOR_MODEL_PATH}"
+if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
+  echo "[log] MEM_ADAPTOR_REF_MODEL_PATH=${MEM_ADAPTOR_REF_MODEL_PATH}"
+else
+  echo "[log] MEM_ADAPTOR_REF_MODEL_PATH=(unset, KL ref uses MEM_ADAPTOR_MODEL_PATH)"
+fi
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
@@ -210,6 +217,11 @@ if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
   )
 fi
 
+MEM_ADAPTOR_REF_CLI=()
+if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
+  MEM_ADAPTOR_REF_CLI+=(mem_adaptor.ref_model.path="${MEM_ADAPTOR_REF_MODEL_PATH}")
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -253,7 +265,14 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       mem_adaptor.use_actor_rollout_wg=false \
       mem_adaptor.train_memory_adaptor=true \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
+      "${MEM_ADAPTOR_REF_CLI[@]+"${MEM_ADAPTOR_REF_CLI[@]}"}" \
+      mem_adaptor.actor_rollout_ref.actor.use_kl_loss=true \
+      mem_adaptor.actor_rollout_ref.actor.kl_loss_coef=0.01 \
+      mem_adaptor.actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+      mem_adaptor.actor_rollout_ref.ref.fsdp_config.param_offload=true \
       mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
+      mem_adaptor.max_new_tokens=128 \
+      mem_adaptor.grpo_english_shaping.penalty=1.0 \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \

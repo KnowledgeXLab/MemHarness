@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -220,6 +220,31 @@ def train_memory_adaptor_enabled(config: DictConfig) -> bool:
     if bool(ma.get("use_actor_rollout_wg", True)):
         return False
     return bool(ma.get("train_memory_adaptor", False))
+
+
+def mem_adaptor_kl_loss_enabled(config: DictConfig) -> bool:
+    """True when dedicated adaptor GRPO should use ``actor.use_kl_loss`` against a frozen ref worker."""
+    if not train_memory_adaptor_enabled(config):
+        return False
+    amref = OmegaConf.select(config, "mem_adaptor.actor_rollout_ref")
+    if amref is None:
+        return False
+    return bool(OmegaConf.select(amref, "actor.use_kl_loss", default=False))
+
+
+def mem_adaptor_ref_actor_rollout_config(config: DictConfig) -> DictConfig:
+    """Config for colocated adaptor ``role=ref`` worker (frozen KL anchor).
+
+    ``mem_adaptor.ref_model.path`` overrides ``model.path`` when set (e.g. base instruct ckpt).
+    """
+    amref = config.mem_adaptor.actor_rollout_ref
+    ref_cfg = OmegaConf.create(OmegaConf.to_container(amref, resolve=True))
+    ref_path = OmegaConf.select(config.mem_adaptor, "ref_model.path", default=None)
+    if ref_path is not None and str(ref_path).strip():
+        with open_dict(ref_cfg):
+            with open_dict(ref_cfg.model):
+                ref_cfg.model.path = str(ref_path).strip()
+    return ref_cfg
 
 
 def _traj_uid_to_episode_reward(gen_batch: DataProto) -> Dict[str, float]:

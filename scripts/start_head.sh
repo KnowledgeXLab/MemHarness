@@ -1,11 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=web-7B-2
+#SBATCH --job-name=alf-1.5b
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=128
 #SBATCH --gpus-per-task=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --quotatype=reserved
+#SBATCH --mem=1000G
 
 
 ### 系统变量, 请按需修改！！！
@@ -14,7 +15,7 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 source ~/switch_cuda.sh 12.4
 nvcc --version
 eval "$(/mnt/petrelfs/wurong/miniconda3/bin/conda shell.bash hook)"
-conda activate verl-agent-webshop
+conda activate verl-agent
 conda info
 
 

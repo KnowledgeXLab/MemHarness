@@ -31,9 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WANDB_OFFLINE_SYNC_RUN_DIRS=(
   # 示例:
   # "/abs/path/to/repo/wandb/offline-run-20260421_112141-xxxxxxxx"
-  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260525_093221-pcpf2qeq"    ## alf-7b-epoch1-same
-  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260526_093612-fdmlxzzs"    ## web-7b-epoch1-same
-  ""    ## web-7b-epoch1-comb
+  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260610_171806-nzhqmta3"    ## alf-1.5b
 
 )
 

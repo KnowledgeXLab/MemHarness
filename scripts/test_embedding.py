@@ -118,7 +118,7 @@ def main():
     parser.add_argument(
         "--url",
         type=str,
-        default="http://10.140.37.35:8081/v1/embeddings",
+        default="http://10.140.37.20:8887/v1/embeddings",
         help="embedding 服务 URL (默认: http://localhost:8000/v1/embeddings)"
     )
 

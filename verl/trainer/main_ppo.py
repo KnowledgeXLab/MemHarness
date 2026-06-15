@@ -60,6 +60,7 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
             "mem_adaptor.model.path is required when mem_adaptor.enable=true and mem_adaptor.use_actor_rollout_wg=false."
         )
     train_ma = bool(ma.get("train_memory_adaptor", False))
+    existing_ar = OmegaConf.select(ma, "actor_rollout_ref", default=None)
     ref = OmegaConf.create(OmegaConf.to_container(config.actor_rollout_ref, resolve=True))
     with open_dict(ref):
         with open_dict(ref.model):
@@ -69,8 +70,6 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
                 ref.model.use_shm = shm
         with open_dict(ref.actor):
             ref.actor.trainable = train_ma
-            if train_ma:
-                ref.actor.use_kl_loss = False
         # Dedicated adaptor WG must run hf/vllm for FSDP log-prob / vLLM generate; do not inherit openai_api.
         with open_dict(ref.rollout):
             if str(ref.rollout.name) == "openai_api":
@@ -82,6 +81,8 @@ def _attach_mem_adaptor_actor_rollout_ref(config) -> None:
                         f"rollout.name=openai_api, got {local_rn!r}"
                     )
                 ref.rollout.name = local_rn
+    if existing_ar is not None:
+        ref = OmegaConf.merge(ref, existing_ar)
     with open_dict(config.mem_adaptor):
         config.mem_adaptor.actor_rollout_ref = ref
 

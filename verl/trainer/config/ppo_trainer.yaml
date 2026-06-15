@@ -556,6 +556,10 @@ mem_adaptor:
   model:
     path: null   # HF checkpoint for adaptor when use_actor_rollout_wg=false (required then)
     use_shm: false
+  # Frozen KL anchor for adaptor GRPO (when mem_adaptor.actor_rollout_ref.actor.use_kl_loss=true).
+  # Null -> same as model.path at worker init (stays frozen while actor trains).
+  ref_model:
+    path: null
   # When the main policy uses rollout.name=openai_api, the adaptor WorkerGroup still needs hf or vllm (default vllm).
   local_rollout_name: vllm
   # Per-node GPU counts for mem_adaptor_pool (length must match trainer.nnodes). Default [1,...,1]. Sum with global pool must fit cluster.

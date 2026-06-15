@@ -2,7 +2,7 @@
 set -x
 set -euo pipefail
 
-export RAY_ADDRESS='http://10.140.37.55:8265'
+export RAY_ADDRESS='http://10.140.37.20:8265'
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -43,12 +43,12 @@ EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic"
 RETRIEVE_KEY="memory_text"
 
-EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.119:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM="True"
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
-MEMORY_REMOTE_SERVER_PORT="8768"
+MEMORY_REMOTE_SERVER_PORT="8766" # 1.5b:8765, 3b:8766
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
@@ -62,7 +62,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-7b-cold-start-20260519_epoch2-webshop_train_adaptor"
+EXPERIMENT_NAME="actor_qwen2.5-7b-cold-start-20260519_epoch1-webshop_train_adaptor-2"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
