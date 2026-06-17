@@ -36,6 +36,7 @@ from agent_system.memory.mem_adaptor_training import (
     train_memory_adaptor_enabled,
 )
 from verl.protocol import write_mem_adaptor_step_non_tensor_batch
+from verl.workers.rollout.openai_api_rollout import resolve_openai_api_system_prompt
 
 class TrajectoryCollector:
     def __init__(
@@ -60,6 +61,13 @@ class TrajectoryCollector:
         self.processor = processor
         self.adaptor_tokenizer = adaptor_tokenizer if adaptor_tokenizer is not None else tokenizer
         self.mem_adaptor_training_samples: list = []
+
+    def _uses_openai_api_rollout(self) -> bool:
+        return str(self.config.actor_rollout_ref.rollout.get("name", "")).strip().lower() == "openai_api"
+
+    def _openai_api_system_prompt(self) -> str:
+        oa = self.config.actor_rollout_ref.rollout.get("openai_api") or {}
+        return resolve_openai_api_system_prompt(oa.get("system_prompt"))
 
     def preprocess_single_sample(
         self,
@@ -107,11 +115,16 @@ class TrajectoryCollector:
         else:
             print(f"Warning: No text observation found!")
 
-        
-        chat = np.array([{
-            "content": obs_content,
-            "role": "user",
-        }])
+        if self._uses_openai_api_rollout():
+            chat = np.array([
+                {"role": "system", "content": self._openai_api_system_prompt()},
+                {"role": "user", "content": obs_content},
+            ])
+        else:
+            chat = np.array([{
+                "content": obs_content,
+                "role": "user",
+            }])
         
         # Apply chat template
         prompt_with_chat_template = self.tokenizer.apply_chat_template(

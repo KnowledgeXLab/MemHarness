@@ -5,7 +5,7 @@ export RAY_ADDRESS='http://10.140.37.29:8265'
 
 ENGINE="openai_api"
 REASONING_OPENAI_BASE_URL="http://35.220.164.252:3888/v1"
-REASONING_OPENAI_MODEL="gpt-5"                 
+REASONING_OPENAI_MODEL="gpt-5.1"                 
 REASONING_OPENAI_API_KEY="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH"  
 # OpenAI Chat API system prompt (plain text; user turn = ALFWorld observation from env)
 REASONING_OPENAI_SYSTEM_PROMPT='You are an expert agent operating in the ALFRED Embodied Environment. First reason step-by-step, then output exactly one admissible environment action in the format required by the user message.'
@@ -26,9 +26,6 @@ MEM_ADAPTOR_MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-sa
 # 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
 MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 
-# --- 与 train_alfworld-adaptor-same 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
-MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
-
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
 trainer_n_gpus_per_node=2
 # mem_adaptor 专用池每节点 GPU 数
@@ -37,6 +34,8 @@ mem_adaptor_gpus_per_node=6
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
+# shellcheck source=memory_eval_helpers.sh
+source "${SCRIPT_DIR}/memory_eval_helpers.sh"
 
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
@@ -48,13 +47,19 @@ export WANDB_DIR='wandb_logs'
 num_cpus_per_env_worker=0.1
 
 TASK_NAME="alfworld"
-MEMORY_ENABLED=False
+MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
 RETRIEVE_KEY="memory_text" # memory_text | state_text
+# agentic 模式：追加到每条观测末尾，引导模型用 <memory_retrieve>...</memory_retrieve> 检索记忆
+# USE_GENERAL_MODEL_RETRIEVAL_HINT=1 → 通用/API 模型推荐文案（默认开，仅 MEMORY_ENABLED=True 且 agentic 时生效）
+# 也可直接设 RETRIEVAL_INSTRUCTION_PROMPT 或 RETRIEVAL_INSTRUCTION_PROMPT_FILE 覆盖
+USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-0}"
+RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
+RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
 EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
@@ -137,7 +142,6 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
-  --overwrite \
   --alfworld_eval_split eval_in_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
@@ -154,6 +158,7 @@ fi
 if [ -n "${EMBEDDING_API_KEY}" ]; then
   MEMORY_CLI+=(env.memory.embedding_api_key="${EMBEDDING_API_KEY}")
 fi
+append_retrieval_instruction_cli
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
@@ -198,14 +203,8 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
 fi
 
 
-# Hydra: values containing commas must be wrapped in single quotes (ConfigCompositionException otherwise).
-hydra_quote_string() {
-  local s="${1:-}"
-  s="${s//\'/\'\\\'\'}"
-  printf "'%s'" "$s"
-}
-
-max_concurrent=32   
+# Hydra: quote a string value (commas / spaces safe). Defined in memory_eval_helpers.sh when sourced.
+max_concurrent=128   
 REASONING_API_CLI=(
   actor_rollout_ref.rollout.openai_api.base_url="${REASONING_OPENAI_BASE_URL}"
   actor_rollout_ref.rollout.openai_api.model="${REASONING_OPENAI_MODEL}"
@@ -242,13 +241,7 @@ else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)
 fi
 
-MEM_ADAPTOR_PHASES_CLI=()
-if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
-  MEM_ADAPTOR_PHASES_CLI+=(
-    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
-    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
-  )
-fi
+
 
 MEM_ADAPTOR_REF_CLI=()
 if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
@@ -296,7 +289,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=false \
+      mem_adaptor.enable=True \
       mem_adaptor.use_actor_rollout_wg=false \
       mem_adaptor.train_memory_adaptor=false \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
@@ -320,7 +313,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
-      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \

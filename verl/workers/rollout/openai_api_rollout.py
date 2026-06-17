@@ -44,6 +44,8 @@ from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_OPENAI_API_SYSTEM_PROMPT = "You are a helpful assistant."
+
 _POLICY_REJECTION_MARKERS = (
     "invalid_prompt",
     "content_filter",
@@ -51,6 +53,13 @@ _POLICY_REJECTION_MARKERS = (
     "content management policy",
     "violating our usage policy",
 )
+
+
+def resolve_openai_api_system_prompt(raw: Any) -> str:
+    """Configured ``openai_api.system_prompt``, else a neutral default (not Qwen identity)."""
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    return DEFAULT_OPENAI_API_SYSTEM_PROMPT
 
 
 def is_policy_rejected_api_error(err: BaseException) -> bool:
@@ -189,8 +198,7 @@ class OpenAIApiRollout(BaseRollout):
         self._retry_backoff = float(self.oa.get("retry_backoff_sec", 1.0))
         self._use_structured_messages = bool(self.oa.get("use_structured_messages", True))
         self._skip_policy_rejected = bool(self.oa.get("skip_policy_rejected_prompts", True))
-        raw_system = self.oa.get("system_prompt")
-        self._system_prompt = str(raw_system).strip() if raw_system is not None else ""
+        self._system_prompt = resolve_openai_api_system_prompt(self.oa.get("system_prompt"))
         extra = self.oa.get("extra_headers")
         self._extra_headers: Dict[str, str] = dict(OmegaConf.to_container(extra, resolve=True)) if extra else {}
         body = self.oa.get("extra_body")

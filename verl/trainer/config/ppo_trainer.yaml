@@ -47,6 +47,7 @@ actor_rollout_ref:
     trust_remote_code: False
   actor:
     # If false, RayPPOTrainer skips update_actor (rollout / generate_sequences unchanged).
+    # Periodic / best-val checkpoints also skip writing actor/ (only mem_adaptor/, critic/, data.pt).
     trainable: true
     strategy: fsdp  # [fsdp, fsdp2], This is for backward-compatibility
     ppo_mini_batch_size: 256
@@ -169,7 +170,7 @@ actor_rollout_ref:
       # send standard OpenAI ``messages: [{role: system}, {role: user}, ...]`` instead of a single user
       # message containing the local tokenizer chat template (e.g. Qwen ``<|im_start|>`` blocks).
       use_structured_messages: true
-      system_prompt: null   # Optional system string prepended when raw chat has no system role.
+      system_prompt: "You are a helpful assistant."   # Used for OpenAI API + local chat when rollout.name=openai_api
     multi_turn:
       enable: False  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
       max_turns: null  # null for no limit (default max_length // 3)
@@ -356,6 +357,7 @@ trainer:
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
   # Fine-grained resume: e.g. only restore mem_adaptor/ while keeping Reasoning weights from HF init.
+  # When checkpoints omit actor/ (trainable=false), resume keeps model.path init even if this is true.
   resume_load_actor: true
   resume_load_mem_adaptor: true
   resume_load_critic: true
@@ -511,7 +513,7 @@ env:
       # (reduces CPU contention with GPU-heavy jobs). If none are idle, submit without --nodelist (unchanged).
       prefer_idle_nodes: true
       prefer_idle_pick: random   # random | first — which idle host to pin when multiple are idle
-    retrieval_instruction_prompt: "If you want to retrieve memory before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."   # Prompt suffix used in agentic retrieval mode.
+    retrieval_instruction_prompt: "If you want to retrieve memory to get some guidance before acting, output exactly one query wrapped by {open_tag} and {close_tag}. After memory is returned, you will act in the next response."   # Agentic mode: appended to each env observation. Override via env.memory.retrieval_instruction_prompt or examples/grpo_trainer/memory_eval_helpers.sh (USE_GENERAL_MODEL_RETRIEVAL_HINT=1 for API/general ckpt eval).
     retrieval_query_open_tag: "<memory_retrieve>"   # Open tag for agentic retrieval queries.
     retrieval_query_close_tag: "</memory_retrieve>"   # Close tag for agentic retrieval queries.
     max_query_chars: 1200   # Max query length used for retrieval.

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=alf-adaptor-local-new
+#SBATCH --job-name=e05-frozen-qwen2.5_7b-train_adaptor_0.5B
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=128
 #SBATCH --mem=500G 
-#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_local_new_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_local_new_%j.err
+#SBATCH --output=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_0.5B_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_0.5B_%j.err
 
 set -x
 set -euo pipefail
@@ -20,9 +20,9 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
-# REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
+# REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
 # 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
@@ -32,18 +32,29 @@ MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
-trainer_n_gpus_per_node=6
+trainer_n_gpus_per_node=4
 # mem_adaptor 专用池每节点 GPU 数
-mem_adaptor_gpus_per_node=2
+mem_adaptor_gpus_per_node=4
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  # sbatch 会把脚本复制到 /var/spool/slurmd/job*/slurm_script，BASH_SOURCE 不是仓库路径
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
+  SCRIPT_DIR="${REPO_ROOT}/examples/grpo_trainer"
 else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
 cd "${REPO_ROOT}"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
+
+# shellcheck source=memory_eval_helpers.sh
+if [[ ! -f "${SCRIPT_DIR}/memory_eval_helpers.sh" ]]; then
+  echo "[error] memory_eval_helpers.sh not found: ${SCRIPT_DIR}/memory_eval_helpers.sh" >&2
+  echo "[error] Submit from repo root: sbatch examples/grpo_trainer/alfworld-frozen_actor-train-adaptor.sh" >&2
+  exit 1
+fi
+source "${SCRIPT_DIR}/memory_eval_helpers.sh"
 
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
@@ -62,6 +73,10 @@ EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
 RETRIEVE_KEY="memory_text" # memory_text | state_text
+# agentic 评测通用 ckpt 时可设 RETRIEVAL_MODE=agentic 并启用下方检索引导（见 memory_eval_helpers.sh）
+USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
+RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
+RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
 EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
@@ -84,7 +99,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-1.5b-cold-start-20260519_epoch1-train_adaptor-kl_ref-new"
+EXPERIMENT_NAME="frozen_qwen2.5_7b-train_adaptor_0.5B"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -114,7 +129,7 @@ fi
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
-train_data_size=18
+train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
 group_size=8
 
@@ -159,6 +174,8 @@ fi
 if [ -n "${EMBEDDING_API_KEY}" ]; then
   MEMORY_CLI+=(env.memory.embedding_api_key="${EMBEDDING_API_KEY}")
 fi
+
+append_retrieval_instruction_cli
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 
@@ -253,10 +270,10 @@ python3 -m verl.trainer.main_ppo \
   data.truncation='error' \
   data.return_raw_chat=True \
   actor_rollout_ref.model.path="${REASONING_MODEL_PATH}" \
-  actor_rollout_ref.actor.trainable=True \
+  actor_rollout_ref.actor.trainable=false \
   actor_rollout_ref.actor.optim.lr=1e-6 \
   actor_rollout_ref.model.use_remove_padding=True \
-  actor_rollout_ref.actor.ppo_mini_batch_size=192 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=256 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
   actor_rollout_ref.actor.use_kl_loss=True \
   actor_rollout_ref.actor.kl_loss_coef=0.01 \

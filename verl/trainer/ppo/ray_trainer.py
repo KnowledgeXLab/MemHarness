@@ -92,6 +92,14 @@ def _frozen_openai_api_reasoning_policy(config) -> bool:
     return not bool(trainable)
 
 
+def _reasoning_actor_trainable(config) -> bool:
+    """True when the main Reasoning actor receives GRPO updates (``actor_rollout_ref.actor.trainable``)."""
+    trainable = OmegaConf.select(config, "actor_rollout_ref.actor.trainable")
+    if trainable is None:
+        return True
+    return bool(trainable)
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -1311,6 +1319,10 @@ class RayPPOTrainer:
                 worker_group=self.actor_rollout_wg,
             )
 
+    def _should_save_reasoning_actor_checkpoint(self) -> bool:
+        """Persist Reasoning actor weights only when the main policy is trainable."""
+        return _reasoning_actor_trainable(self.config)
+
     def _save_checkpoint_at(
         self,
         local_global_step_folder: str,
@@ -1320,19 +1332,14 @@ class RayPPOTrainer:
     ) -> None:
         """Persist actor / optional mem_adaptor / critic + dataloader state under ``local_global_step_folder``.
 
+        When ``actor_rollout_ref.actor.trainable=false``, Reasoning actor weights are not written
+        (only ``mem_adaptor/``, optional ``critic/``, and ``data.pt``).
+
         ``hdfs_step_folder_name``: segment under ``default_hdfs_dir`` (e.g. ``global_step_50``).
         Pass ``None`` to skip remote paths (used for best-val snapshots saved only locally).
         """
         os.makedirs(local_global_step_folder, exist_ok=True)
         print(f"local_global_step_folder: {local_global_step_folder}")
-        actor_local_path = os.path.join(local_global_step_folder, "actor")
-
-        if self.config.trainer.default_hdfs_dir is None or not hdfs_step_folder_name:
-            actor_remote_path = None
-        else:
-            actor_remote_path = os.path.join(
-                self.config.trainer.default_hdfs_dir, hdfs_step_folder_name, "actor"
-            )
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
         if remove_previous_ckpt_in_save:
@@ -1347,9 +1354,23 @@ class RayPPOTrainer:
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
 
-        self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
-        )
+        if self._should_save_reasoning_actor_checkpoint():
+            actor_local_path = os.path.join(local_global_step_folder, "actor")
+            if self.config.trainer.default_hdfs_dir is None or not hdfs_step_folder_name:
+                actor_remote_path = None
+            else:
+                actor_remote_path = os.path.join(
+                    self.config.trainer.default_hdfs_dir, hdfs_step_folder_name, "actor"
+                )
+            self.actor_rollout_wg.save_checkpoint(
+                actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            )
+        else:
+            print(
+                "[checkpoint] Skipping Reasoning actor save "
+                "(actor_rollout_ref.actor.trainable=false).",
+                flush=True,
+            )
 
         if self.adaptor_rollout_wg is not None:
             ma_local = os.path.join(local_global_step_folder, "mem_adaptor")
@@ -1412,7 +1433,7 @@ class RayPPOTrainer:
         if os.path.lexists(root_step):
             return
         ckpt_abs = os.path.abspath(checkpoint_dir)
-        if not self._periodic_checkpoint_has_actor(ckpt_abs):
+        if not self._periodic_checkpoint_can_symlink_for_best_val(ckpt_abs):
             return
         os.symlink(ckpt_abs, root_step, target_is_directory=True)
         print(
@@ -1568,7 +1589,7 @@ class RayPPOTrainer:
 
         use_symlink = bool(self.config.trainer.get("save_best_val_symlink_when_periodic_exists", True))
         periodic_dir = self._periodic_checkpoint_dir_for_step()
-        symlink_ok = use_symlink and self._periodic_checkpoint_has_actor(periodic_dir)
+        symlink_ok = use_symlink and self._periodic_checkpoint_can_symlink_for_best_val(periodic_dir)
 
         print(
             f"Saving best-val checkpoint (metric={metric_key!r} score={score:.6f} mode={mode} rank={rank + 1}/{max_k}) "
@@ -1621,7 +1642,14 @@ class RayPPOTrainer:
             root = os.path.join(os.getcwd(), root)
         return os.path.join(root, f"global_step_{step}")
 
-    def _periodic_checkpoint_has_actor(self, periodic_dir: str) -> bool:
+    def _periodic_checkpoint_can_symlink_for_best_val(self, periodic_dir: str) -> bool:
+        """True when an on-disk periodic checkpoint matches what we would save at this step."""
+        if not os.path.isdir(periodic_dir):
+            return False
+        if self._should_save_reasoning_actor_checkpoint():
+            return os.path.isdir(os.path.join(periodic_dir, "actor"))
+        if self.adaptor_rollout_wg is not None:
+            return os.path.isdir(os.path.join(periodic_dir, "mem_adaptor"))
         return os.path.isdir(os.path.join(periodic_dir, "actor"))
 
     @staticmethod
@@ -1680,8 +1708,14 @@ class RayPPOTrainer:
         load_actor = bool(self.config.trainer.get("resume_load_actor", True))
         load_ma = bool(self.config.trainer.get("resume_load_mem_adaptor", True))
         load_critic = bool(self.config.trainer.get("resume_load_critic", True))
-        if load_actor:
+        if load_actor and os.path.isdir(actor_path):
             self.actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        elif load_actor:
+            print(
+                "[resume] No actor/ in checkpoint; keeping Reasoning weights from model init "
+                f"({self.config.actor_rollout_ref.model.path}).",
+                flush=True,
+            )
         else:
             print("[resume] Skipping actor weights (resume_load_actor=false); keeping weights from model init.")
         if self.adaptor_rollout_wg is not None and os.path.isdir(ma_path) and load_ma:

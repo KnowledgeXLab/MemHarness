@@ -13,13 +13,11 @@ REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
-# MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
-MEM_ADAPTOR_MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
+MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+# MEM_ADAPTOR_MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
 # 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
 MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 
-# --- 与 train_alfworld-adaptor-same 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
-MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
 trainer_n_gpus_per_node=6
@@ -29,6 +27,8 @@ mem_adaptor_gpus_per_node=2
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
+# shellcheck source=memory_eval_helpers.sh
+source "${SCRIPT_DIR}/memory_eval_helpers.sh"
 
 DATA_ROOT="data/verl-agent"
 TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
@@ -45,8 +45,12 @@ MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
-RETRIEVAL_MODE="fixed" # agentic | fixed（与 remote 默认一致）
-RETRIEVE_KEY="state_text" # memory_text | state_text
+RETRIEVAL_MODE="agentic" # agentic | fixed（与 remote 默认一致）
+RETRIEVE_KEY="memory_text" # memory_text | state_text
+# agentic 评测通用 ckpt 时可设 RETRIEVAL_MODE=agentic 并启用下方检索引导（见 memory_eval_helpers.sh）
+USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
+RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
+RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
 EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
@@ -69,7 +73,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="qwen2.5-7b-adaptor-7b-test"
+EXPERIMENT_NAME="qwen2.5-7b-adaptor-qwen2.5-7b-test-new"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -128,7 +132,6 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
-  --overwrite \
   --alfworld_eval_split eval_in_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
@@ -145,6 +148,7 @@ fi
 if [ -n "${EMBEDDING_API_KEY}" ]; then
   MEMORY_CLI+=(env.memory.embedding_api_key="${EMBEDDING_API_KEY}")
 fi
+append_retrieval_instruction_cli
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
@@ -211,13 +215,7 @@ else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)
 fi
 
-MEM_ADAPTOR_PHASES_CLI=()
-if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
-  MEM_ADAPTOR_PHASES_CLI+=(
-    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
-    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
-  )
-fi
+
 
 MEM_ADAPTOR_REF_CLI=()
 if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
@@ -263,7 +261,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=true \
+      mem_adaptor.enable=True \
       mem_adaptor.use_actor_rollout_wg=false \
       mem_adaptor.train_memory_adaptor=false \
       mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
@@ -287,7 +285,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
-      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \

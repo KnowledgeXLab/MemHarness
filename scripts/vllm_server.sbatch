@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=vllm-bge-m3
+#SBATCH --job-name=e00-bge-m3
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -23,7 +23,7 @@
 #   MEMADAPTOR_REPO_ROOT 若设置则直接用（最高优先级）
 #   否则批量作业必须用 SLURM_SUBMIT_DIR：提交任务时所在的目录（sbatch 在仓库根执行时即为仓库根）
 #   （勿用脚本路径推断仓库根：计算节点上的 batch 拷贝在 /var/spool/slurmd/… 会得到错误路径）
-#   GPU_NUM / VLLM_PORT / VLLM_HOST —— 传给 scripts/vllm_server.sh（见脚本内注释）
+#   GPU_NUM / VLLM_PORT / VLLM_HOST / VLLM_API_KEY —— 传给 scripts/vllm_server.sh（见脚本内注释）
 # -----------------------------------------------------------------------------
 
 set -eo pipefail
