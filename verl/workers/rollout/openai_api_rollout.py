@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +43,20 @@ from verl.utils.torch_functional import get_response_mask
 from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__name__)
+
+_POLICY_REJECTION_MARKERS = (
+    "invalid_prompt",
+    "content_filter",
+    "usage policy",
+    "content management policy",
+    "violating our usage policy",
+)
+
+
+def is_policy_rejected_api_error(err: BaseException) -> bool:
+    """True when the gateway rejected the prompt for content / usage policy (typically HTTP 400)."""
+    msg = str(err).lower()
+    return any(marker in msg for marker in _POLICY_REJECTION_MARKERS)
 
 
 def _normalize_chat_url(base_url: str) -> str:
@@ -147,6 +162,16 @@ def build_openai_messages(
     return messages
 
 
+def _preview_user_message(messages: Sequence[Dict[str, str]], max_chars: int = 160) -> str:
+    for msg in messages:
+        if msg.get("role") == "user":
+            text = str(msg.get("content") or "")
+            if len(text) <= max_chars:
+                return text
+            return text[: max_chars - 1] + "…"
+    return ""
+
+
 class OpenAIApiRollout(BaseRollout):
     """Rollout via OpenAI-compatible ``/v1/chat/completions`` (no local generation)."""
 
@@ -163,6 +188,7 @@ class OpenAIApiRollout(BaseRollout):
         self._max_retries = int(self.oa.get("max_retries", 2))
         self._retry_backoff = float(self.oa.get("retry_backoff_sec", 1.0))
         self._use_structured_messages = bool(self.oa.get("use_structured_messages", True))
+        self._skip_policy_rejected = bool(self.oa.get("skip_policy_rejected_prompts", True))
         raw_system = self.oa.get("system_prompt")
         self._system_prompt = str(raw_system).strip() if raw_system is not None else ""
         extra = self.oa.get("extra_headers")
@@ -182,6 +208,24 @@ class OpenAIApiRollout(BaseRollout):
             model_norm = self._model.lower().replace("-", "").replace("_", "").replace(".", "")
             if "qwen3" in model_norm:
                 self._extra_body.setdefault("enable_thinking", False)
+
+        self._stats_lock = threading.Lock()
+        self._api_call_total = 0
+        self._api_policy_rejected_total = 0
+
+    def _record_batch_stats(self, batch_total: int, batch_rejected: int) -> None:
+        with self._stats_lock:
+            self._api_call_total += batch_total
+            self._api_policy_rejected_total += batch_rejected
+            cumulative_rejected = self._api_policy_rejected_total
+            cumulative_total = self._api_call_total
+
+        summary = (
+            f"openai_api rollout: batch policy_rejected={batch_rejected}/{batch_total}, "
+            f"cumulative policy_rejected={cumulative_rejected}/{cumulative_total}"
+        )
+        logger.info(summary)
+        print(summary, flush=True)
 
     def _decode_prompt_text(self, idx_row: torch.Tensor, attention_row: torch.Tensor) -> str:
         row_mask = attention_row.bool()
@@ -248,7 +292,7 @@ class OpenAIApiRollout(BaseRollout):
             top_p = float(prompts.meta_info["top_p"])
 
         max_tokens = int(prompts.meta_info.get("response_length", self.config.response_length))
-        responses_text = self._complete_batch(
+        responses_text, policy_rejected_flags = self._complete_batch(
             batch_messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -281,7 +325,10 @@ class OpenAIApiRollout(BaseRollout):
             },
             batch_size=batch_size,
         )
-        non_tensor = {"api_response_text": np.array(responses_text, dtype=object)}
+        non_tensor = {
+            "api_response_text": np.array(responses_text, dtype=object),
+            "api_policy_rejected": np.array(policy_rejected_flags, dtype=bool),
+        }
         return DataProto(batch=batch, non_tensor_batch=non_tensor)
 
     def _complete_batch(
@@ -290,14 +337,17 @@ class OpenAIApiRollout(BaseRollout):
         max_tokens: int,
         temperature: float,
         top_p: float,
-    ) -> List[str]:
+    ) -> tuple[List[str], List[bool]]:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
             **self._extra_headers,
         }
+        batch_rejected = 0
+        reject_lock = threading.Lock()
 
-        def one(i: int, messages: Sequence[Dict[str, str]]) -> str:
+        def one(i: int, messages: Sequence[Dict[str, str]]) -> tuple[str, bool]:
+            nonlocal batch_rejected
             payload: Dict[str, Any] = {
                 "model": self._model,
                 "messages": list(messages),
@@ -315,9 +365,20 @@ class OpenAIApiRollout(BaseRollout):
             last_err: Optional[BaseException] = None
             for attempt in range(self._max_retries + 1):
                 try:
-                    return _http_chat_completion(self._url, headers, payload, self._timeout)
+                    return _http_chat_completion(self._url, headers, payload, self._timeout), False
                 except Exception as e:  # noqa: BLE001 — surface after retries
                     last_err = e
+                    if self._skip_policy_rejected and is_policy_rejected_api_error(e):
+                        preview = _preview_user_message(messages)
+                        logger.warning(
+                            "openai_api policy rejection at batch index %s (skip, empty response): %s; user_preview=%r",
+                            i,
+                            e,
+                            preview,
+                        )
+                        with reject_lock:
+                            batch_rejected += 1
+                        return "", True
                     logger.warning("openai_api rollout attempt %s failed: %s", attempt, e)
                     if attempt < self._max_retries:
                         time.sleep(delay)
@@ -325,13 +386,19 @@ class OpenAIApiRollout(BaseRollout):
             assert last_err is not None
             raise last_err
 
+        batch_total = len(batch_messages)
         if self._max_concurrent <= 1:
-            return [one(i, batch_messages[i]) for i in range(len(batch_messages))]
+            results = [one(i, batch_messages[i]) for i in range(batch_total)]
+        else:
+            out: List[Optional[tuple[str, bool]]] = [None] * batch_total
+            with ThreadPoolExecutor(max_workers=min(self._max_concurrent, batch_total)) as ex:
+                futs = {ex.submit(one, i, batch_messages[i]): i for i in range(batch_total)}
+                for fut in as_completed(futs):
+                    i = futs[fut]
+                    out[i] = fut.result()
+            results = [x if x is not None else ("", False) for x in out]
 
-        out: List[Optional[str]] = [None] * len(batch_messages)
-        with ThreadPoolExecutor(max_workers=min(self._max_concurrent, len(batch_messages))) as ex:
-            futs = {ex.submit(one, i, batch_messages[i]): i for i in range(len(batch_messages))}
-            for fut in as_completed(futs):
-                i = futs[fut]
-                out[i] = fut.result()
-        return [x or "" for x in out]
+        responses_text = [text or "" for text, _ in results]
+        policy_rejected_flags = [bool(rejected) for _, rejected in results]
+        self._record_batch_stats(batch_total, batch_rejected)
+        return responses_text, policy_rejected_flags

@@ -5,7 +5,7 @@ export RAY_ADDRESS='http://10.140.37.29:8265'
 
 ENGINE="openai_api"
 REASONING_OPENAI_BASE_URL="http://35.220.164.252:3888/v1"
-REASONING_OPENAI_MODEL="gpt-5.1"                 
+REASONING_OPENAI_MODEL="gpt-5"                 
 REASONING_OPENAI_API_KEY="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH"  
 # OpenAI Chat API system prompt (plain text; user turn = ALFWorld observation from env)
 REASONING_OPENAI_SYSTEM_PROMPT='You are an expert agent operating in the ALFRED Embodied Environment. First reason step-by-step, then output exactly one admissible environment action in the format required by the user message.'
@@ -198,6 +198,13 @@ if [ "${MEMORY_REMOTE_SLURM_LC}" = "true" ] || [ "${MEMORY_REMOTE_SLURM_LC}" = "
 fi
 
 
+# Hydra: values containing commas must be wrapped in single quotes (ConfigCompositionException otherwise).
+hydra_quote_string() {
+  local s="${1:-}"
+  s="${s//\'/\'\\\'\'}"
+  printf "'%s'" "$s"
+}
+
 max_concurrent=32   
 REASONING_API_CLI=(
   actor_rollout_ref.rollout.openai_api.base_url="${REASONING_OPENAI_BASE_URL}"
@@ -205,7 +212,7 @@ REASONING_API_CLI=(
   actor_rollout_ref.rollout.openai_api.use_structured_messages=true
 )
 if [ -n "${REASONING_OPENAI_SYSTEM_PROMPT:-}" ]; then
-  REASONING_API_CLI+=(actor_rollout_ref.rollout.openai_api.system_prompt="${REASONING_OPENAI_SYSTEM_PROMPT}")
+  REASONING_API_CLI+=("actor_rollout_ref.rollout.openai_api.system_prompt=$(hydra_quote_string "${REASONING_OPENAI_SYSTEM_PROMPT}")")
 fi
 if [ -n "${REASONING_OPENAI_API_KEY}" ]; then
   REASONING_API_CLI+=(actor_rollout_ref.rollout.openai_api.api_key="${REASONING_OPENAI_API_KEY}")

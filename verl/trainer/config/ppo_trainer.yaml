@@ -163,6 +163,8 @@ actor_rollout_ref:
       extra_headers: { }
       extra_body: { }   # Extra JSON fields merged into /v1/chat/completions payload.
       disable_thinking: null   # null -> auto disable for qwen3* models; true -> force add enable_thinking=false.
+      # When true (default), invalid_prompt / content_filter HTTP 400s return empty text instead of failing the job.
+      skip_policy_rejected_prompts: true
       # When true (default) and ``raw_prompt`` is present (requires data.return_raw_chat=True upstream),
       # send standard OpenAI ``messages: [{role: system}, {role: user}, ...]`` instead of a single user
       # message containing the local tokenizer chat template (e.g. Qwen ``<|im_start|>`` blocks).
