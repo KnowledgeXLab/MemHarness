@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
+#SBATCH --job-name=alf-adaptor-same-new
+#SBATCH --partition=DataFrontier_Explore
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=500G 
+#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_same_new_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_same_new_%j.err
+
+
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.29:8265'
+
+mkdir -p logs/mem_adaptor/alfworld
+
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -11,10 +24,9 @@ export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
 # MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
+MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
 # MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
 # MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
-MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
 
 # --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
@@ -43,7 +55,7 @@ num_cpus_per_env_worker=0.1
 TASK_NAME="alfworld"
 
 MEMORY_ENABLED=True
-MEMORY_WRITE_BACK=False
+MEMORY_WRITE_BACK=True
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
@@ -51,7 +63,7 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 
 RETRIEVE_KEY="memory_text"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
 EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
@@ -214,8 +226,12 @@ if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
   )
 fi
 
-ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
-    python3 -m verl.trainer.main_ppo \
+unset RAY_ADDRESS
+ray stop --force || true
+ray start --head
+sleep 5
+
+python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
       data.train_files="${TRAIN_FILE}" \
       data.val_files="${VAL_FILE}" \
@@ -253,8 +269,8 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=True \
-      mem_adaptor.use_actor_rollout_wg=True \
+      mem_adaptor.enable=true \
+      mem_adaptor.use_actor_rollout_wg=true \
       mem_adaptor.train_memory_adaptor=false \
       mem_adaptor.model.path="${MODEL_PATH}" \
       env.env_name=alfworld/AlfredTWEnv \
@@ -290,6 +306,6 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=True \
-      trainer.val_only=True \
+      trainer.val_before_train=False \
+      trainer.val_only=False \
       "$@"

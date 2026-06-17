@@ -9,23 +9,22 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
-# 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
-# MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
-# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
-# MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
-MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
+REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
+# REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
+# REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
+# MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
+# MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
+MEM_ADAPTOR_MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
+# 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
+MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 
-# --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
+# --- 与 train_alfworld-adaptor-same 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
-# global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数
-trainer_n_gpus_per_node=8
-GPU_NUM="${trainer_n_gpus_per_node}"
-# MemAdaptor GPU：仅当 mem_adaptor.use_actor_rollout_wg=false 时，main_ppo 才会注册 mem_adaptor_pool 并占用
-# mem_adaptor.resource_pool_gpus_per_node（见 verl/trainer/main_ppo.py::_mem_adaptor_dedicated_rollout_wg）。
-# use_actor_rollout_wg=true 时 Adaptor 前向与主 policy 共用同一 Actor/vLLM（不建独立池），勿再设专用卡数。
-# 若要 GRPO 训练 Adaptor：须 use_actor_rollout_wg=false + train_memory_adaptor=true + 下面专用池（示例见 train_alfworld-adaptor-local.sh）。
+# global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
+trainer_n_gpus_per_node=6
+# mem_adaptor 专用池每节点 GPU 数
+mem_adaptor_gpus_per_node=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -41,14 +40,13 @@ export WANDB_DIR='wandb_logs'
 num_cpus_per_env_worker=0.1
 
 TASK_NAME="alfworld"
-
 MEMORY_ENABLED=True
 MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
-RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 检索）
-RETRIEVE_KEY="memory_text"
+RETRIEVAL_MODE="fixed" # agentic | fixed（与 remote 默认一致）
+RETRIEVE_KEY="state_text" # memory_text | state_text
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
 EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
@@ -56,8 +54,8 @@ EMBEDDING_API_KEY=""
 
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
-MEMORY_REMOTE_SERVER_PORT="8766"
-# 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
+MEMORY_REMOTE_SERVER_PORT="8765"
+# 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需列表语法，见下方 mem_exclude_to_hydra_list
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
@@ -71,7 +69,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-7B-cold_start_20260519_epoch1-1"
+EXPERIMENT_NAME="qwen2.5-7b-adaptor-7b-test"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -84,32 +82,39 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
-TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
+# MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-7B-cold_start_20260519_epoch1-1-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb'
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_local_reasoning-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
-echo "[log] MODEL_PATH (Reasoning + MemAdaptor)=${MODEL_PATH}"
+echo "[log] REASONING_MODEL_PATH=${REASONING_MODEL_PATH}"
+echo "[log] MEM_ADAPTOR_MODEL_PATH=${MEM_ADAPTOR_MODEL_PATH}"
+if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
+  echo "[log] MEM_ADAPTOR_REF_MODEL_PATH=${MEM_ADAPTOR_REF_MODEL_PATH}"
+else
+  echo "[log] MEM_ADAPTOR_REF_MODEL_PATH=(unset, KL ref uses MEM_ADAPTOR_MODEL_PATH)"
+fi
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
-train_data_size=16
+train_data_size=18
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
 group_size=8
 
 # 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
-# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
-DATA_MAX_PROMPT_LENGTH=2048
+# （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。  
+DATA_MAX_PROMPT_LENGTH=3072
 DATA_MAX_RESPONSE_LENGTH=512
-SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
+SUMMARIZER_MAX_PROMPT_TOKENS=12288
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
 if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
   ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
 fi
 
-# 与 trainer_n_gpus_per_node、模型宽度匹配（单卡可设 1）
+# vLLM TP；须与 Reasoning 池 GPU 布局一致（单卡填 1）
 tensor_model_parallel_size=2
 
 VALIDATE_ON_TRAIN_SPLIT=False
@@ -145,7 +150,7 @@ export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/pyt
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
 RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH']}}))")"
 
-# Slurm --exclude 逗号分隔多节点。Hydra 对 ``a,b`` 会报 Ambiguous；用列表语法 ``['a','b']``（见 remote_slurm_launcher 对 list 的 join）
+# Slurm --exclude 逗号分隔多节点。Hydra 对 ``a,b`` 会报 Ambiguous；用列表语法 ``['a','b']``
 mem_exclude_to_hydra_list() {
   local s="${1:-}" IFS=,
   read -r -a _ex_parts <<< "$s" || true
@@ -214,6 +219,11 @@ if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
   )
 fi
 
+MEM_ADAPTOR_REF_CLI=()
+if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
+  MEM_ADAPTOR_REF_CLI+=(mem_adaptor.ref_model.path="${MEM_ADAPTOR_REF_MODEL_PATH}")
+fi
+
 ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
@@ -226,11 +236,11 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       data.filter_overlong_prompts=True \
       data.truncation='error' \
       data.return_raw_chat=True \
-      actor_rollout_ref.model.path="${MODEL_PATH}" \
+      actor_rollout_ref.model.path="${REASONING_MODEL_PATH}" \
       actor_rollout_ref.actor.trainable=True \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.model.use_remove_padding=True \
-      actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+      actor_rollout_ref.actor.ppo_mini_batch_size=192 \
       actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
       actor_rollout_ref.actor.use_kl_loss=True \
       actor_rollout_ref.actor.kl_loss_coef=0.01 \
@@ -242,7 +252,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
       actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
       actor_rollout_ref.rollout.name="${ENGINE}" \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
+      actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
       actor_rollout_ref.rollout.enable_chunked_prefill=False \
       actor_rollout_ref.rollout.enforce_eager=False \
       actor_rollout_ref.rollout.free_cache_engine=False \
@@ -253,10 +263,18 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=True \
-      mem_adaptor.use_actor_rollout_wg=True \
+      mem_adaptor.enable=true \
+      mem_adaptor.use_actor_rollout_wg=false \
       mem_adaptor.train_memory_adaptor=false \
-      mem_adaptor.model.path="${MODEL_PATH}" \
+      mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
+      "${MEM_ADAPTOR_REF_CLI[@]+"${MEM_ADAPTOR_REF_CLI[@]}"}" \
+      mem_adaptor.actor_use_kl_loss=true \
+      mem_adaptor.actor_kl_loss_coef=0.01 \
+      mem_adaptor.actor_kl_loss_type=low_var_kl \
+      mem_adaptor.ref_param_offload=true \
+      mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
+      mem_adaptor.max_new_tokens=128 \
+      mem_adaptor.grpo_english_shaping.penalty=1.0 \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
       env.seed=0 \

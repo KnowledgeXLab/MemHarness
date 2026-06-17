@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
+#SBATCH --job-name=alf-adaptor-local-new
+#SBATCH --partition=DataFrontier_Explore
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=500G 
+#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_local_new_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_local_new_%j.err
+
 set -x
 set -euo pipefail
-export RAY_ADDRESS='http://10.140.37.29:8265'
+
+mkdir -p logs/mem_adaptor/alfworld
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -26,7 +37,12 @@ trainer_n_gpus_per_node=6
 mem_adaptor_gpus_per_node=2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+cd "${REPO_ROOT}"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
 
 DATA_ROOT="data/verl-agent"
@@ -68,7 +84,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="actor_qwen2.5-1.5b-cold-start-20260519_epoch1-train_adaptor-kl_ref"
+EXPERIMENT_NAME="actor_qwen2.5-1.5b-cold-start-20260519_epoch1-train_adaptor-kl_ref-new"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -85,7 +101,7 @@ TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_local_reasoning-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_local_new-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REASONING_MODEL_PATH=${REASONING_MODEL_PATH}"
@@ -145,8 +161,6 @@ if [ -n "${EMBEDDING_API_KEY}" ]; then
 fi
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
-# Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
-RAY_JOB_RUNTIME_ENV_JSON="$(python3 -c "import json, os; print(json.dumps({'excludes': ['logs', 'ray_log', 'swanlog'], 'env_vars': {'VLLM_NCCL_SO_PATH': os.environ['VLLM_NCCL_SO_PATH']}}))")"
 
 # Slurm --exclude 逗号分隔多节点。Hydra 对 ``a,b`` 会报 Ambiguous；用列表语法 ``['a','b']``
 mem_exclude_to_hydra_list() {
@@ -222,91 +236,94 @@ if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
   MEM_ADAPTOR_REF_CLI+=(mem_adaptor.ref_model.path="${MEM_ADAPTOR_REF_MODEL_PATH}")
 fi
 
-ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
-    python3 -m verl.trainer.main_ppo \
-      algorithm.adv_estimator=grpo \
-      data.train_files="${TRAIN_FILE}" \
-      data.val_files="${VAL_FILE}" \
-      data.train_batch_size="${train_data_size}" \
-      data.val_batch_size="${val_data_size}" \
-      data.max_prompt_length="${DATA_MAX_PROMPT_LENGTH}" \
-      data.max_response_length="${DATA_MAX_RESPONSE_LENGTH}" \
-      data.filter_overlong_prompts=True \
-      data.truncation='error' \
-      data.return_raw_chat=True \
-      actor_rollout_ref.model.path="${REASONING_MODEL_PATH}" \
-      actor_rollout_ref.actor.trainable=True \
-      actor_rollout_ref.actor.optim.lr=1e-6 \
-      actor_rollout_ref.model.use_remove_padding=True \
-      actor_rollout_ref.actor.ppo_mini_batch_size=192 \
-      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
-      actor_rollout_ref.actor.use_kl_loss=True \
-      actor_rollout_ref.actor.kl_loss_coef=0.01 \
-      actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-      actor_rollout_ref.model.enable_gradient_checkpointing=True \
-      actor_rollout_ref.actor.fsdp_config.param_offload=False \
-      actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-      actor_rollout_ref.actor.checkpoint.save_contents='[model,optimizer,extra,hf_model]' \
-      actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-      actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
-      actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
-      actor_rollout_ref.rollout.name="${ENGINE}" \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
-      actor_rollout_ref.rollout.enable_chunked_prefill=False \
-      actor_rollout_ref.rollout.enforce_eager=False \
-      actor_rollout_ref.rollout.free_cache_engine=False \
-      actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
-      actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-      actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-      actor_rollout_ref.ref.fsdp_config.param_offload=True \
-      actor_rollout_ref.actor.use_invalid_action_penalty=True \
-      actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
-      algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=true \
-      mem_adaptor.use_actor_rollout_wg=false \
-      mem_adaptor.train_memory_adaptor=true \
-      mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
-      "${MEM_ADAPTOR_REF_CLI[@]+"${MEM_ADAPTOR_REF_CLI[@]}"}" \
-      mem_adaptor.actor_use_kl_loss=true \
-      mem_adaptor.actor_kl_loss_coef=0.01 \
-      mem_adaptor.actor_kl_loss_type=low_var_kl \
-      mem_adaptor.ref_param_offload=true \
-      mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
-      mem_adaptor.max_new_tokens=128 \
-      mem_adaptor.grpo_english_shaping.penalty=1.0 \
-      env.env_name=alfworld/AlfredTWEnv \
-      env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
-      env.seed=0 \
-      env.max_steps=50 \
-      env.memory.enabled="${MEMORY_ENABLED}" \
-      env.memory.store_dir="${MEMORY_STORE_DIR}" \
-      env.memory.write_back="${MEMORY_WRITE_BACK}" \
-      env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
-      env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
-      env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
-      env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
-      env.memory.retrieve_key="${RETRIEVE_KEY}" \
-      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
-      "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
-      "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
-      "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
-      "${FORMAT_REWARD_CLI[@]+"${FORMAT_REWARD_CLI[@]}"}" \
-      env.rollout.n="${group_size}" \
-      env.resources_per_worker.num_cpus="${num_cpus_per_env_worker}" \
-      trainer.critic_warmup=0 \
-      trainer.logger=['console','wandb'] \
-      trainer.project_name='MemAdaptor_alfworld' \
-      trainer.experiment_name="${EXPERIMENT_NAME}" \
-      trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
-      trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
-      trainer.nnodes=1 \
-      trainer.save_freq=50 \
-      trainer.save_best_val_ckpt=True \
-      trainer.save_best_val_mode="max" \
-      trainer.save_best_val_metric="val/success_rate" \
-      trainer.test_freq=5 \
-      trainer.total_epochs=150 \
-      trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=False \
-      trainer.val_only=False \
-      "$@"
+unset RAY_ADDRESS
+ray stop --force || true
+ray start --head
+sleep 5
+
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files="${TRAIN_FILE}" \
+  data.val_files="${VAL_FILE}" \
+  data.train_batch_size="${train_data_size}" \
+  data.val_batch_size="${val_data_size}" \
+  data.max_prompt_length="${DATA_MAX_PROMPT_LENGTH}" \
+  data.max_response_length="${DATA_MAX_RESPONSE_LENGTH}" \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.return_raw_chat=True \
+  actor_rollout_ref.model.path="${REASONING_MODEL_PATH}" \
+  actor_rollout_ref.actor.trainable=True \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.ppo_mini_batch_size=192 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.kl_loss_coef=0.01 \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.fsdp_config.param_offload=False \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
+  actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
+  actor_rollout_ref.rollout.name="${ENGINE}" \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+  actor_rollout_ref.rollout.enable_chunked_prefill=False \
+  actor_rollout_ref.rollout.enforce_eager=False \
+  actor_rollout_ref.rollout.free_cache_engine=False \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
+  actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.use_invalid_action_penalty=True \
+  actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+  algorithm.use_kl_in_reward=False \
+  mem_adaptor.enable=true \
+  mem_adaptor.use_actor_rollout_wg=false \
+  mem_adaptor.train_memory_adaptor=true \
+  mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
+  "${MEM_ADAPTOR_REF_CLI[@]+"${MEM_ADAPTOR_REF_CLI[@]}"}" \
+  mem_adaptor.actor_use_kl_loss=true \
+  mem_adaptor.actor_kl_loss_coef=0.01 \
+  mem_adaptor.actor_kl_loss_type=low_var_kl \
+  mem_adaptor.ref_param_offload=true \
+  mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
+  mem_adaptor.max_new_tokens=128 \
+  mem_adaptor.grpo_english_shaping.penalty=1.0 \
+  env.env_name=alfworld/AlfredTWEnv \
+  env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
+  env.seed=0 \
+  env.max_steps=50 \
+  env.memory.enabled="${MEMORY_ENABLED}" \
+  env.memory.store_dir="${MEMORY_STORE_DIR}" \
+  env.memory.write_back="${MEMORY_WRITE_BACK}" \
+  env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
+  env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
+  env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
+  env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
+  env.memory.retrieve_key="${RETRIEVE_KEY}" \
+  "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
+  "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
+  "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
+  "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
+  "${FORMAT_REWARD_CLI[@]+"${FORMAT_REWARD_CLI[@]}"}" \
+  env.rollout.n="${group_size}" \
+  env.resources_per_worker.num_cpus="${num_cpus_per_env_worker}" \
+  trainer.critic_warmup=0 \
+  trainer.logger=['console','wandb'] \
+  trainer.project_name='MemAdaptor_alfworld' \
+  trainer.experiment_name="${EXPERIMENT_NAME}" \
+  trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
+  trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
+  trainer.nnodes=1 \
+  trainer.save_freq=50 \
+  trainer.save_best_val_ckpt=True \
+  trainer.save_best_val_mode="max" \
+  trainer.save_best_val_metric="val/success_rate" \
+  trainer.test_freq=5 \
+  trainer.total_epochs=150 \
+  trainer.validation_data_dir="${EXP_DIR}/val_traj" \
+  trainer.val_before_train=False \
+  trainer.val_only=False \
+  "$@"

@@ -74,7 +74,7 @@ actor_rollout_ref:
     policy_loss:
       loss_mode: "vanilla"
     checkpoint:
-      contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      contents: ['model', 'optimizer', 'extra', 'hf_model']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
     optim:
       lr: 1e-6
       lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
@@ -163,6 +163,11 @@ actor_rollout_ref:
       extra_headers: { }
       extra_body: { }   # Extra JSON fields merged into /v1/chat/completions payload.
       disable_thinking: null   # null -> auto disable for qwen3* models; true -> force add enable_thinking=false.
+      # When true (default) and ``raw_prompt`` is present (requires data.return_raw_chat=True upstream),
+      # send standard OpenAI ``messages: [{role: system}, {role: user}, ...]`` instead of a single user
+      # message containing the local tokenizer chat template (e.g. Qwen ``<|im_start|>`` blocks).
+      use_structured_messages: true
+      system_prompt: null   # Optional system string prepended when raw chat has no system role.
     multi_turn:
       enable: False  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
       max_turns: null  # null for no limit (default max_length // 3)
