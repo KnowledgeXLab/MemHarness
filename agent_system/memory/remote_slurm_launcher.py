@@ -132,7 +132,7 @@ def start_memory_vdb_on_slurm_node(
 
     sbatch_lines = [
         "#!/bin/bash",
-        "#SBATCH -J memadaptor-vdb",
+        "#SBATCH -J e05-vdb",
         f"#SBATCH -p {partition}",
         "#SBATCH -N 1",
         "#SBATCH -n 1",

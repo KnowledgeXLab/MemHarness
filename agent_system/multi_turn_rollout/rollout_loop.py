@@ -33,6 +33,7 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from agent_system.memory.mem_adaptor_rollout import maybe_apply_memory_adaptor
 from agent_system.memory.mem_adaptor_training import (
     prune_mem_adaptor_training_samples_after_group_filter,
+    resolve_pending_mem_adaptor_step_rewards,
     train_memory_adaptor_enabled,
 )
 from verl.protocol import write_mem_adaptor_step_non_tensor_batch
@@ -536,6 +537,10 @@ class TrajectoryCollector:
                 and adaptor_rollout_wg is not None
             ):
                 adaptor_train_buf = self.mem_adaptor_training_samples
+                resolve_pending_mem_adaptor_step_rewards(
+                    self.mem_adaptor_training_samples,
+                    torch_to_numpy(rewards),
+                )
 
             adaptor_episode_lengths = episode_lengths
             if np.any(memory_query_mask) and not count_query_as_step:
@@ -557,6 +562,7 @@ class TrajectoryCollector:
                 adaptor_training_buffer=adaptor_train_buf,
                 traj_uid=traj_uid,
                 grpo_group_uid=uid_batch,
+                step_rewards=torch_to_numpy(rewards),
             )
             write_mem_adaptor_step_non_tensor_batch(batch, infos, batch_size)
 

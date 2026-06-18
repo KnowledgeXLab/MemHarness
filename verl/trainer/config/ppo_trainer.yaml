@@ -637,12 +637,30 @@ mem_adaptor:
   # Non-null: overrides data.apply_chat_template_kwargs for adaptor apply_chat_template only.
   # Use the adaptor tokenizer (mem_adaptor.model.path); kwargs should match that checkpoint's chat format.
   apply_chat_template_kwargs: null
+  # GRPO outcome mix (per adaptor row, on last response token):
+  #   score = episode_return_coef * R_episode
+  #         + step_coef * max(0, R_next_step - R_at_adaptor)   [grpo_step_reward_shaping]
+  #         - identical_penalty_coef * penalty                 [grpo_identical_rewrite_penalty]
+  #         - english_penalty_coef * penalty                   [grpo_english_shaping]
+  # Tune relative weights without changing code. Set episode_return_coef=0 for step-only credit.
+  grpo_reward:
+    episode_return_coef: 1.0
   # GRPO auxiliary: subtract penalty from outcome reward on the scored token when decoded response matches pattern.
   # Default pattern: CJK, kana, Hangul, Cyrillic, Arabic. Set pattern: null uses default; or a custom regex string.
   grpo_english_shaping:
     enable: true
+    coef: 1.0
     penalty: 0.5
     pattern: null
+  # GRPO auxiliary: bonus when env reward on the step after adaptor rewrite increases vs the step when adaptor ran.
+  grpo_step_reward_shaping:
+    enable: true
+    coef: 1.0
+  # GRPO auxiliary: severe penalty when adaptor accepts but outputs text identical to retrieved p_old.
+  grpo_identical_rewrite_penalty:
+    enable: true
+    coef: 1.0
+    penalty: 1.0
   max_new_tokens: 256
   max_prompt_chars: 12000
   do_sample: true

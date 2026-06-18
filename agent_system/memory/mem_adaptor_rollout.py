@@ -483,6 +483,7 @@ def maybe_apply_memory_adaptor(
     adaptor_training_buffer: Optional[List[Dict[str, Any]]] = None,
     traj_uid: Optional[np.ndarray] = None,
     grpo_group_uid: Optional[np.ndarray] = None,
+    step_rewards: Optional[np.ndarray] = None,
 ) -> None:
     """
     After ``step_with_memory``, optionally run batched Adaptor ``generate_sequences`` and
@@ -623,6 +624,10 @@ def maybe_apply_memory_adaptor(
             else:
                 grpo_id = str(uuid.uuid4())
             _, call_reject = _normalize_adaptor_output(str(dec[k]), empty_markers)
+            norm_text, _ = _normalize_adaptor_output(str(dec[k]), empty_markers)
+            reward_at_step = 0.0
+            if step_rewards is not None and env_i < len(step_rewards):
+                reward_at_step = float(step_rewards[env_i])
             rec: Dict[str, Any] = {
                 "prompts": out.batch["prompts"][k].detach().cpu().clone(),
                 "responses": out.batch["responses"][k].detach().cpu().clone(),
@@ -633,6 +638,11 @@ def maybe_apply_memory_adaptor(
                 "grpo_index": grpo_id,
                 "pad_token_id": pad_tok,
                 "mem_adaptor_reject": bool(call_reject),
+                "env_i": int(env_i),
+                "p_old": str(row_trace_meta[k]["p_old"]),
+                "adaptor_norm_text": norm_text,
+                "reward_at_adaptor_step": reward_at_step,
+                "pending_next_step_reward": not bool(call_reject),
             }
             if "rollout_log_probs" in out.batch.keys():
                 rec["rollout_log_probs"] = out.batch["rollout_log_probs"][k].detach().cpu().clone()

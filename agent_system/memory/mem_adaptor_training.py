@@ -39,6 +39,100 @@ def _decode_adaptor_response_row(tokenizer: "PreTrainedTokenizer", resp: torch.T
         return ""
 
 
+def _normalize_principle_text(text: str) -> str:
+    """Collapse whitespace for comparing adaptor output vs original principle."""
+    return " ".join((text or "").strip().split())
+
+
+def _is_placeholder_p_old(p_old: str, ma: DictConfig) -> bool:
+    t = _normalize_principle_text(p_old)
+    if not t:
+        return True
+    ph = _normalize_principle_text(str(ma.get("placeholder_old_principle", "(none)")))
+    return bool(ph) and t == ph
+
+
+def resolve_pending_mem_adaptor_step_rewards(
+    samples: List[Dict[str, Any]],
+    step_rewards: np.ndarray,
+) -> None:
+    """Attach env reward from the step immediately after an adaptor rewrite (same rollout round)."""
+    if not samples:
+        return
+    for s in samples:
+        if not s.get("pending_next_step_reward"):
+            continue
+        env_i = int(s.get("env_i", -1))
+        if env_i < 0 or env_i >= len(step_rewards):
+            s["pending_next_step_reward"] = False
+            s["next_step_env_reward"] = None
+            continue
+        s["next_step_env_reward"] = float(step_rewards[env_i])
+        s["pending_next_step_reward"] = False
+
+
+def finalize_pending_mem_adaptor_step_rewards(samples: List[Dict[str, Any]]) -> None:
+    """Clear unresolved pending rows at rollout end (no next env step after adaptor)."""
+    for s in samples:
+        if s.get("pending_next_step_reward"):
+            s["pending_next_step_reward"] = False
+            s["next_step_env_reward"] = None
+
+
+def _mem_adaptor_grpo_step_reward_shaping_delta(ma: DictConfig, sample: Dict[str, Any]) -> tuple[float, bool]:
+    """Bonus when the env reward on the step after adaptor rewrite increases vs the prior step."""
+    gs = OmegaConf.select(ma, "grpo_step_reward_shaping", default=None)
+    if gs is None or not bool(gs.get("enable", False)):
+        return 0.0, False
+    if bool(sample.get("mem_adaptor_reject", False)):
+        return 0.0, False
+    if sample.get("pending_next_step_reward", False):
+        return 0.0, False
+    next_r = sample.get("next_step_env_reward")
+    if next_r is None:
+        return 0.0, False
+    prior = float(sample.get("reward_at_adaptor_step", 0.0))
+    delta_r = float(next_r) - prior
+    if delta_r <= 0.0:
+        return 0.0, False
+    coef = float(gs.get("coef", 1.0))
+    return coef * delta_r, True
+
+
+def _mem_adaptor_grpo_identical_rewrite_penalty_delta(
+    ma: DictConfig,
+    sample: Dict[str, Any],
+    response_text: str,
+) -> tuple[float, bool]:
+    """Severe penalty when adaptor accepts but outputs text identical to the retrieved principle."""
+    gs = OmegaConf.select(ma, "grpo_identical_rewrite_penalty", default=None)
+    if gs is None or not bool(gs.get("enable", False)):
+        return 0.0, False
+    if bool(sample.get("mem_adaptor_reject", False)):
+        return 0.0, False
+    p_old = str(sample.get("p_old", ""))
+    if _is_placeholder_p_old(p_old, ma):
+        return 0.0, False
+    from agent_system.memory.mem_adaptor_rollout import _normalize_adaptor_output
+
+    empty_markers = list(ma.get("empty_output_markers", ["<EMPTY>", "<empty>"]))
+    norm_resp, is_reject = _normalize_adaptor_output(response_text, empty_markers)
+    if is_reject or not norm_resp:
+        return 0.0, False
+    if _normalize_principle_text(norm_resp) != _normalize_principle_text(p_old):
+        return 0.0, False
+    penalty = float(gs.get("penalty", 1.0))
+    coef = float(gs.get("coef", 1.0))
+    return -abs(coef * penalty), True
+
+
+def _mem_adaptor_grpo_episode_return_coef(ma: DictConfig) -> float:
+    gr = OmegaConf.select(ma, "grpo_reward", default=None)
+    if gr is not None and gr.get("episode_return_coef") is not None:
+        return float(gr.get("episode_return_coef"))
+    return 1.0
+
+
 def _mem_adaptor_grpo_english_shaping_delta(ma: DictConfig, response_text: str) -> tuple[float, bool]:
     """Return (scalar delta added to outcome reward, whether penalty applied)."""
     gs = OmegaConf.select(ma, "grpo_english_shaping", default=None)
@@ -57,7 +151,8 @@ def _mem_adaptor_grpo_english_shaping_delta(ma: DictConfig, response_text: str) 
         pat = _GRPO_ENGLISH_SHAPING_DEFAULT_RE
     if pat.search(text):
         penalty = float(gs.get("penalty", 0.5))
-        return -abs(penalty), True
+        coef = float(gs.get("coef", 1.0))
+        return -abs(coef * penalty), True
     return 0.0, False
 
 
@@ -159,6 +254,8 @@ def mem_adaptor_rollout_diag_metrics(
         "nonempty_rate": 0.0,
         "success_rate_when_applied": 0.0,
         "success_rate_when_rejected": 0.0,
+        "step_reward_bonus_rate": 0.0,
+        "identical_rewrite_penalty_rate": 0.0,
     }
     if not samples:
         return empty
@@ -190,6 +287,9 @@ def mem_adaptor_rollout_diag_metrics(
     reject_flags: List[float] = []
     succ_when_applied: List[float] = []
     succ_when_rejected: List[float] = []
+    step_bonus_flags: List[float] = []
+    identical_pen_flags: List[float] = []
+    nonempty_n = 0
 
     for s in samples:
         tid = str(s.get("traj_uid", ""))
@@ -201,6 +301,20 @@ def mem_adaptor_rollout_diag_metrics(
             succ_when_rejected.append(succ)
         else:
             succ_when_applied.append(succ)
+            nonempty_n += 1
+            prior = float(s.get("reward_at_adaptor_step", 0.0))
+            next_r = s.get("next_step_env_reward")
+            if next_r is not None and float(next_r) > prior:
+                step_bonus_flags.append(1.0)
+            else:
+                step_bonus_flags.append(0.0)
+            p_old = str(s.get("p_old", ""))
+            norm_resp = _normalize_principle_text(str(s.get("adaptor_norm_text", "")))
+            norm_old = _normalize_principle_text(p_old)
+            if norm_resp and norm_old and norm_old != "(none)" and norm_resp == norm_old:
+                identical_pen_flags.append(1.0)
+            else:
+                identical_pen_flags.append(0.0)
 
     n = len(samples)
     return {
@@ -209,6 +323,8 @@ def mem_adaptor_rollout_diag_metrics(
         "nonempty_rate": float(1.0 - np.mean(reject_flags)) if n else 0.0,
         "success_rate_when_applied": float(np.mean(succ_when_applied)) if succ_when_applied else 0.0,
         "success_rate_when_rejected": float(np.mean(succ_when_rejected)) if succ_when_rejected else 0.0,
+        "step_reward_bonus_rate": float(np.mean(step_bonus_flags)) if nonempty_n else 0.0,
+        "identical_rewrite_penalty_rate": float(np.mean(identical_pen_flags)) if nonempty_n else 0.0,
     }
 
 
@@ -288,12 +404,16 @@ def build_memory_adaptor_grpo_batch(
     """
     if not samples:
         return None
+    finalize_pending_mem_adaptor_step_rewards(samples)
     rmap = _traj_uid_to_episode_reward(gen_batch_output)
     rl = int(config.mem_adaptor.actor_rollout_ref.rollout.response_length)
     ma = config.mem_adaptor
+    episode_coef = _mem_adaptor_grpo_episode_return_coef(ma)
     rows: List[dict] = []
     n_shaping_pen = 0
     n_shaping_tot = 0
+    n_step_bonus = 0
+    n_identical_pen = 0
     for s in samples:
         tid = str(s["traj_uid"])
         r = float(rmap.get(tid, 0.0))
@@ -310,10 +430,16 @@ def build_memory_adaptor_grpo_batch(
         last = min(last, rl - 1)
         n_shaping_tot += 1
         dec = _decode_adaptor_response_row(tokenizer, resp, pad_id) if tokenizer is not None else ""
-        delta, shaped = _mem_adaptor_grpo_english_shaping_delta(ma, dec)
-        if shaped:
+        delta_en, shaped_en = _mem_adaptor_grpo_english_shaping_delta(ma, dec)
+        if shaped_en:
             n_shaping_pen += 1
-        scores[last] = r + delta
+        delta_step, shaped_step = _mem_adaptor_grpo_step_reward_shaping_delta(ma, s)
+        if shaped_step:
+            n_step_bonus += 1
+        delta_id, shaped_id = _mem_adaptor_grpo_identical_rewrite_penalty_delta(ma, s, dec)
+        if shaped_id:
+            n_identical_pen += 1
+        scores[last] = episode_coef * r + delta_en + delta_step + delta_id
         row = {
             "prompts": s["prompts"],
             "responses": s["responses"],
@@ -332,6 +458,9 @@ def build_memory_adaptor_grpo_batch(
     if n_shaping_tot > 0:
         meta["mem_adaptor_english_shaping_penalized"] = float(n_shaping_pen)
         meta["mem_adaptor_english_shaping_total"] = float(n_shaping_tot)
+        meta["mem_adaptor_step_reward_bonus"] = float(n_step_bonus)
+        meta["mem_adaptor_identical_rewrite_penalized"] = float(n_identical_pen)
+        meta["mem_adaptor_shaping_total"] = float(n_shaping_tot)
     return DataProto.from_single_dict(
         data=data,
         meta_info=meta,

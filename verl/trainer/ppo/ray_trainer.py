@@ -1926,6 +1926,16 @@ class RayPPOTrainer:
                                             metrics["mem_adaptor/english_shaping_penalty_rate"] = float(
                                                 _npi or 0.0
                                             ) / float(_npt)
+                                        _shaping_tot = ma_batch.meta_info.get("mem_adaptor_shaping_total")
+                                        if _shaping_tot is not None and float(_shaping_tot) > 0.0:
+                                            _step_b = ma_batch.meta_info.get("mem_adaptor_step_reward_bonus")
+                                            _id_pen = ma_batch.meta_info.get("mem_adaptor_identical_rewrite_penalized")
+                                            metrics["mem_adaptor/step_reward_bonus_rate"] = float(
+                                                _step_b or 0.0
+                                            ) / float(_shaping_tot)
+                                            metrics["mem_adaptor/identical_rewrite_penalty_rate"] = float(
+                                                _id_pen or 0.0
+                                            ) / float(_shaping_tot)
                                     ma_batch.batch["response_mask"] = compute_response_mask(ma_batch)
                                     ma_batch.meta_info["global_token_num"] = torch.sum(
                                         ma_batch.batch["attention_mask"], dim=-1

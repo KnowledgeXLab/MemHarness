@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WANDB_OFFLINE_SYNC_RUN_DIRS=(
   # 示例:
   # "/abs/path/to/repo/wandb/offline-run-20260421_112141-xxxxxxxx"
-  "/mnt/petrelfs/wurong/workspace/MemAdaptor/wandb/offline-run-20260616_100733-d7r319zg"    ## alf-1.5b
+  "wandb_logs/wandb/offline-run-20260617_213146-uhl99yiu"    ## frozen_qwen2.5_7b-train_adaptor_0.5B
 
 )
 

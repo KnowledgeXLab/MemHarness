@@ -80,10 +80,10 @@ RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
 EMBEDDING_API_URL="http://10.140.37.57:8081/v1"
-EMBEDDING_API_KEY=""
+EMBEDDING_API_KEY="DataFrontier_bge_m3"
 
 MEMORY_REMOTE_SLURM=True
-MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
+MEMORY_REMOTE_PARTITION="DataFrontier_Explore"  # DataFrontier_Explore / p-cpu-new
 MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需列表语法，见下方 mem_exclude_to_hydra_list
 MEMORY_REMOTE_EXCLUDE_NODES=''
@@ -308,6 +308,7 @@ python3 -m verl.trainer.main_ppo \
   mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
   mem_adaptor.max_new_tokens=128 \
   mem_adaptor.grpo_english_shaping.penalty=1.0 \
+  mem_adaptor.grpo_identical_rewrite_penalty.penalty=2.0 \
   env.env_name=alfworld/AlfredTWEnv \
   env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
   env.seed=0 \
