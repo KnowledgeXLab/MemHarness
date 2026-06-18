@@ -82,14 +82,24 @@ from agent_system.memory.mem_adaptor_training import (
 WorkerType = Type[Worker]
 
 
-def _frozen_openai_api_reasoning_policy(config) -> bool:
-    """Main rollout is OpenAI-compatible HTTP and the policy actor is frozen (not trainable)."""
-    if str(OmegaConf.select(config, "actor_rollout_ref.rollout.name") or "") != "openai_api":
-        return False
+def _frozen_reasoning_policy(config) -> bool:
+    """Main Reasoning actor is frozen (``actor_rollout_ref.actor.trainable=false``)."""
     trainable = OmegaConf.select(config, "actor_rollout_ref.actor.trainable")
     if trainable is None:
         return False
     return not bool(trainable)
+
+
+def _skip_reasoning_log_prob_recompute(config) -> bool:
+    """Skip FSDP ``compute_log_prob`` / ref recompute when Reasoning is not trained."""
+    return _frozen_reasoning_policy(config)
+
+
+def _frozen_openai_api_reasoning_policy(config) -> bool:
+    """Main rollout is OpenAI-compatible HTTP and the policy actor is frozen (not trainable)."""
+    if str(OmegaConf.select(config, "actor_rollout_ref.rollout.name") or "") != "openai_api":
+        return False
+    return _frozen_reasoning_policy(config)
 
 
 def _reasoning_actor_trainable(config) -> bool:
@@ -2020,8 +2030,8 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
-                        if _frozen_openai_api_reasoning_policy(self.config):
-                            # API generation does not populate token-level responses aligned with local FSDP; skip log-prob.
+                        if _skip_reasoning_log_prob_recompute(self.config):
+                            # Frozen Reasoning: no actor update; skip expensive FSDP log-prob pass.
                             responses = batch.batch["responses"]
                             z = torch.zeros(
                                 responses.shape[0],
@@ -2081,7 +2091,7 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            if _frozen_openai_api_reasoning_policy(self.config):
+                            if _skip_reasoning_log_prob_recompute(self.config):
                                 ref_lp = DataProto.from_dict(
                                     tensors={"ref_log_prob": batch.batch["old_log_probs"].clone()},
                                 )

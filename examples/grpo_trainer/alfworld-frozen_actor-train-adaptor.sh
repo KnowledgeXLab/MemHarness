@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-frozen-qwen2.5_7b-train_adaptor_0.5B
+#SBATCH --job-name=e05-frozen-qwen2.5_7b-train_adaptor_3B
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=128
 #SBATCH --mem=500G 
-#SBATCH --output=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_0.5B_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_0.5B_%j.err
+#SBATCH --output=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_3B_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/frozen_qwen2.5_7b-train_adaptor_3B_%j.err
 
 set -x
 set -euo pipefail
@@ -24,17 +24,34 @@ REASONING_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
 # REASONING_MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
 # MemAdaptor 专用池上的模型（可与 Reasoning 相同或更小）
-MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-0.5B-Instruct"
+MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-3B-Instruct"
 # 可选：单独指定 KL ref；留空则默认与 MEM_ADAPTOR_MODEL_PATH 相同（worker 初始化时冻结）
 MEM_ADAPTOR_REF_MODEL_PATH="${MEM_ADAPTOR_REF_MODEL_PATH:-}"
 
 # --- 与 train_alfworld-adaptor-same 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
 MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
-# global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数；本地 vLLM 需占卡，请与 tensor_model_parallel_size、模型体量一并调整
+# global_pool：Reasoning（vLLM+FSDP actor 等）每节点 GPU 数；须 >= REASONING_TENSOR_PARALLEL_SIZE
 trainer_n_gpus_per_node=4
-# mem_adaptor 专用池每节点 GPU 数
+# mem_adaptor 专用池每节点 GPU 数（8 卡节点上 trainer_n + mem_adaptor 应 <= 8）
 mem_adaptor_gpus_per_node=4
+
+# --- Adaptor GRPO reward 系数（可用环境变量覆盖，例如 MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF=0.3 sbatch ...）---
+# score = episode_return_coef * R_episode
+#       + step_reward_coef * max(0, R_next - R_at_adaptor)     [step_reward_enable]
+#       - identical_coef * identical_penalty                   [identical_enable]
+#       - english_coef * english_penalty                       [english_enable]
+MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF="${MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF:-1.0}"
+MEM_ADAPTOR_GRPO_STEP_REWARD_ENABLE="${MEM_ADAPTOR_GRPO_STEP_REWARD_ENABLE:-true}"
+MEM_ADAPTOR_GRPO_STEP_REWARD_COEF="${MEM_ADAPTOR_GRPO_STEP_REWARD_COEF:-1.0}"
+MEM_ADAPTOR_GRPO_IDENTICAL_ENABLE="${MEM_ADAPTOR_GRPO_IDENTICAL_ENABLE:-true}"
+MEM_ADAPTOR_GRPO_IDENTICAL_COEF="${MEM_ADAPTOR_GRPO_IDENTICAL_COEF:-1.0}"
+MEM_ADAPTOR_GRPO_IDENTICAL_PENALTY="${MEM_ADAPTOR_GRPO_IDENTICAL_PENALTY:-2.0}"
+MEM_ADAPTOR_GRPO_ENGLISH_ENABLE="${MEM_ADAPTOR_GRPO_ENGLISH_ENABLE:-true}"
+MEM_ADAPTOR_GRPO_ENGLISH_COEF="${MEM_ADAPTOR_GRPO_ENGLISH_COEF:-1.0}"
+MEM_ADAPTOR_GRPO_ENGLISH_PENALTY="${MEM_ADAPTOR_GRPO_ENGLISH_PENALTY:-1.0}"
+# 同一条轨迹多次 adaptor 调用时，GRPO advantage 再除以调用次数 K
+MEM_ADAPTOR_GRPO_DIVIDE_ADV_BY_TRAJ_STEPS="${MEM_ADAPTOR_GRPO_DIVIDE_ADV_BY_TRAJ_STEPS:-true}"
 
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -99,7 +116,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="frozen_qwen2.5_7b-train_adaptor_0.5B"
+EXPERIMENT_NAME="frozen_qwen2.5_7b-train_adaptor_3B"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -126,6 +143,11 @@ if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
 else
   echo "[log] MEM_ADAPTOR_REF_MODEL_PATH=(unset, KL ref uses MEM_ADAPTOR_MODEL_PATH)"
 fi
+echo "[log] MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF=${MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF}"
+echo "[log] MEM_ADAPTOR_GRPO_STEP_REWARD_ENABLE=${MEM_ADAPTOR_GRPO_STEP_REWARD_ENABLE} coef=${MEM_ADAPTOR_GRPO_STEP_REWARD_COEF}"
+echo "[log] MEM_ADAPTOR_GRPO_IDENTICAL_ENABLE=${MEM_ADAPTOR_GRPO_IDENTICAL_ENABLE} coef=${MEM_ADAPTOR_GRPO_IDENTICAL_COEF} penalty=${MEM_ADAPTOR_GRPO_IDENTICAL_PENALTY}"
+echo "[log] MEM_ADAPTOR_GRPO_ENGLISH_ENABLE=${MEM_ADAPTOR_GRPO_ENGLISH_ENABLE} coef=${MEM_ADAPTOR_GRPO_ENGLISH_COEF} penalty=${MEM_ADAPTOR_GRPO_ENGLISH_PENALTY}"
+echo "[log] MEM_ADAPTOR_GRPO_DIVIDE_ADV_BY_TRAJ_STEPS=${MEM_ADAPTOR_GRPO_DIVIDE_ADV_BY_TRAJ_STEPS}"
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
@@ -143,8 +165,12 @@ if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
   ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
 fi
 
-# vLLM TP；须与 Reasoning 池 GPU 布局一致（单卡填 1）
+# vLLM TP；须与 Reasoning 池 GPU 数一致且 trainer_n_gpus_per_node 可被整除
 tensor_model_parallel_size=2
+if (( trainer_n_gpus_per_node % tensor_model_parallel_size != 0 )); then
+  echo "[error] trainer_n_gpus_per_node=${trainer_n_gpus_per_node} must be divisible by REASONING_TENSOR_PARALLEL_SIZE=${tensor_model_parallel_size}" >&2
+  exit 1
+fi
 
 VALIDATE_ON_TRAIN_SPLIT=False
 
@@ -253,6 +279,19 @@ if [ -n "${MEM_ADAPTOR_REF_MODEL_PATH}" ]; then
   MEM_ADAPTOR_REF_CLI+=(mem_adaptor.ref_model.path="${MEM_ADAPTOR_REF_MODEL_PATH}")
 fi
 
+MEM_ADAPTOR_REWARD_CLI=(
+  mem_adaptor.grpo_reward.episode_return_coef="${MEM_ADAPTOR_GRPO_EPISODE_RETURN_COEF}"
+  mem_adaptor.grpo_step_reward_shaping.enable="${MEM_ADAPTOR_GRPO_STEP_REWARD_ENABLE}"
+  mem_adaptor.grpo_step_reward_shaping.coef="${MEM_ADAPTOR_GRPO_STEP_REWARD_COEF}"
+  mem_adaptor.grpo_identical_rewrite_penalty.enable="${MEM_ADAPTOR_GRPO_IDENTICAL_ENABLE}"
+  mem_adaptor.grpo_identical_rewrite_penalty.coef="${MEM_ADAPTOR_GRPO_IDENTICAL_COEF}"
+  mem_adaptor.grpo_identical_rewrite_penalty.penalty="${MEM_ADAPTOR_GRPO_IDENTICAL_PENALTY}"
+  mem_adaptor.grpo_english_shaping.enable="${MEM_ADAPTOR_GRPO_ENGLISH_ENABLE}"
+  mem_adaptor.grpo_english_shaping.coef="${MEM_ADAPTOR_GRPO_ENGLISH_COEF}"
+  mem_adaptor.grpo_english_shaping.penalty="${MEM_ADAPTOR_GRPO_ENGLISH_PENALTY}"
+  mem_adaptor.grpo_divide_advantage_by_traj_adaptor_steps="${MEM_ADAPTOR_GRPO_DIVIDE_ADV_BY_TRAJ_STEPS}"
+)
+
 unset RAY_ADDRESS
 ray stop --force || true
 ray start --head
@@ -275,18 +314,18 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.actor.ppo_mini_batch_size=256 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
-  actor_rollout_ref.actor.use_kl_loss=True \
+  actor_rollout_ref.actor.use_kl_loss=False \
+  actor_rollout_ref.actor.fsdp_config.param_offload=true \
   actor_rollout_ref.actor.kl_loss_coef=0.01 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-  actor_rollout_ref.model.enable_gradient_checkpointing=True \
-  actor_rollout_ref.actor.fsdp_config.param_offload=False \
+  actor_rollout_ref.model.enable_gradient_checkpointing=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
   actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
   actor_rollout_ref.rollout.name="${ENGINE}" \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
-  actor_rollout_ref.rollout.enable_chunked_prefill=False \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+  actor_rollout_ref.rollout.enable_chunked_prefill=true \
   actor_rollout_ref.rollout.enforce_eager=False \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
@@ -307,8 +346,7 @@ python3 -m verl.trainer.main_ppo \
   mem_adaptor.ref_param_offload=true \
   mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
   mem_adaptor.max_new_tokens=128 \
-  mem_adaptor.grpo_english_shaping.penalty=1.0 \
-  mem_adaptor.grpo_identical_rewrite_penalty.penalty=2.0 \
+  "${MEM_ADAPTOR_REWARD_CLI[@]}" \
   env.env_name=alfworld/AlfredTWEnv \
   env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
   env.seed=0 \
