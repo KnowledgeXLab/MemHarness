@@ -1,6 +1,43 @@
 # Shared helpers for eval / local-test launch scripts (Hydra overrides for memory prompts).
 # Source from examples/grpo_trainer/*.sh — do not execute directly.
 
+# Resolve ${REPO_ROOT}/data to a real directory (follows symlink, e.g. -> phwfile).
+# Fails fast when compute nodes lack /mnt/phwfile or when `data` is a stray file.
+resolve_repo_data_dir() {
+  local link="${REPO_ROOT:?REPO_ROOT unset}/data"
+  if [[ -L "${link}" ]]; then
+    local resolved
+    resolved="$(readlink -f "${link}" 2>/dev/null || true)"
+    if [[ -z "${resolved}" || ! -d "${resolved}" ]]; then
+      echo "[error] Broken/unavailable data symlink: ${link} -> $(readlink "${link}" 2>/dev/null)" >&2
+      echo "[error] Ensure /mnt/phwfile is mounted on compute nodes (workspace/data -> phwfile)." >&2
+      return 1
+    fi
+    printf '%s' "${resolved}"
+  elif [[ -e "${link}" && ! -d "${link}" ]]; then
+    echo "[error] ${link} exists but is not a directory (remove stray file?)." >&2
+    return 1
+  else
+    mkdir -p "${link}"
+    printf '%s' "$(readlink -f "${link}")"
+  fi
+}
+
+# Per-bench placeholder parquet under ${REPO_DATA_DIR}/MemAdaptor/verl-agent/<bench>/text/.
+# Aligns with exp_results under data/MemAdaptor/. Avoids concurrent --overwrite races across benches.
+# Sets: DATA_ROOT, TRAIN_FILE, TEST_FILE, VAL_FILE (requires REPO_ROOT or REPO_DATA_DIR).
+setup_verl_agent_text_data_paths() {
+  local bench="${1:?bench name required (e.g. alfworld, webshop)}"
+  if [[ -z "${REPO_DATA_DIR:-}" ]]; then
+    REPO_DATA_DIR="$(resolve_repo_data_dir)" || return 1
+  fi
+  DATA_ROOT="${REPO_DATA_DIR}/MemAdaptor/verl-agent/${bench}"
+  TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
+  TEST_FILE="${DATA_ROOT}/text/test.parquet"
+  VAL_FILE="${TEST_FILE}"
+  echo "[log] verl-agent data bench=${bench} DATA_ROOT=${DATA_ROOT}"
+}
+
 # Hydra: quote a string value (commas / spaces safe).
 hydra_quote_string() {
   local s="${1:-}"

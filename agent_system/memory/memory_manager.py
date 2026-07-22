@@ -105,6 +105,7 @@ class MemoryManager:
             mode=memory_config.mode,
             clean_before_init=memory_config.clean_before_init,
         )
+        print(f"Memory VDB row count: {self.store.count_records()}", flush=True)
 
         self._last_utility_prune_step: int = -1
         self._last_utility_clear_step: int = -1

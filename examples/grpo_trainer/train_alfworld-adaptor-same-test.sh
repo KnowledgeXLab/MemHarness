@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=alf-adaptor-same-new
+#SBATCH --job-name=e05-alf-cold-7B-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=500G 
-#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_same_new_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_same_new_%j.err
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=32
+#SBATCH --quotatype=reserved
+#SBATCH --mem=200G 
+#SBATCH --output=logs/mem_adaptor/alfworld/cold_start_7b_test_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/cold_start_7b_test_%j.err
 
 
 set -x
@@ -24,29 +25,44 @@ export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
 # MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
+# MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/best_val/global_step_170/actor/huggingface'
+MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260706/global_step_400'
+# MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-3B-cold_start_20260519_epoch1-with_agentic_memory-retrieve_memory_text-self_distill/global_step_200/actor/huggingface'
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-1.5b-cold-start-20260519/global_step_250'
 # MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260430/global_step_125'
 # MODEL_PATH="models/save_models/mem_adaptor/cold_start/qwen2.5-14b-cold-start-20260430/global_step_62"
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260519/global_step_250'
 
-# --- 与 train_alfworld-adaptor-local 一致：可选按 global_step 切换检索 / Adaptor env 步调度 ---
-MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
 
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数
-trainer_n_gpus_per_node=8
+trainer_n_gpus_per_node=2
 GPU_NUM="${trainer_n_gpus_per_node}"
 # MemAdaptor GPU：仅当 mem_adaptor.use_actor_rollout_wg=false 时，main_ppo 才会注册 mem_adaptor_pool 并占用
 # mem_adaptor.resource_pool_gpus_per_node（见 verl/trainer/main_ppo.py::_mem_adaptor_dedicated_rollout_wg）。
 # use_actor_rollout_wg=true 时 Adaptor 前向与主 policy 共用同一 Actor/vLLM（不建独立池），勿再设专用卡数。
 # 若要 GRPO 训练 Adaptor：须 use_actor_rollout_wg=false + train_memory_adaptor=true + 下面专用池（示例见 train_alfworld-adaptor-local.sh）。
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  # sbatch 会把脚本复制到 /var/spool/slurmd/job*/slurm_script，BASH_SOURCE 不是仓库路径
+  REPO_ROOT="${SLURM_SUBMIT_DIR}"
+  SCRIPT_DIR="${REPO_ROOT}/examples/grpo_trainer"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+fi
+cd "${REPO_ROOT}"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
 
-DATA_ROOT="data/verl-agent"
-TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
-TEST_FILE="${DATA_ROOT}/text/test.parquet"
-VAL_FILE="${TEST_FILE}"
+# shellcheck source=memory_eval_helpers.sh
+if [[ ! -f "${SCRIPT_DIR}/memory_eval_helpers.sh" ]]; then
+  echo "[error] memory_eval_helpers.sh not found: ${SCRIPT_DIR}/memory_eval_helpers.sh" >&2
+  echo "[error] Submit from repo root: sbatch examples/grpo_trainer/train_alfworld-adaptor-same.sh" >&2
+  exit 1
+fi
+source "${SCRIPT_DIR}/memory_eval_helpers.sh"
+
+REPO_DATA_DIR="$(resolve_repo_data_dir)" || exit 1
+setup_verl_agent_text_data_paths alfworld || exit 1
 
 export WANDB_DIR='wandb_logs'
 
@@ -54,8 +70,8 @@ num_cpus_per_env_worker=0.1
 
 TASK_NAME="alfworld"
 
-MEMORY_ENABLED=True
-MEMORY_WRITE_BACK=True
+MEMORY_ENABLED=False
+MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
@@ -63,12 +79,16 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 
 RETRIEVE_KEY="memory_text"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
-EMBEDDING_API_KEY=""
+EMBEDDING_API_URL="http://10.140.37.55:8081/v1"
+EMBEDDING_API_KEY="DataFrontier_bge_m3"
+
+USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
+RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
+RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
-MEMORY_REMOTE_SERVER_PORT="8766"
+MEMORY_REMOTE_SERVER_PORT="8768"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
@@ -83,8 +103,11 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-7B-cold_start_20260519_epoch1-1"
-EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
+
+EXPERIMENT_NAME="train_adaptor-same-7B-cold_start_20260706_epoch2-step_170-no_memory-test"
+# EXPERIMENT_NAME="train_adaptor-same-1.5B-cold_start_20260519_epoch1"
+# EXPERIMENT_NAME="train_adaptor-same-7B-new"
+EXPERIMENTS_ROOT="${REPO_DATA_DIR}/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
@@ -95,20 +118,29 @@ else
 fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
-MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
-TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${EXPERIMENT_NAME}"
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/alfworld/${EXPERIMENT_NAME}"
+
+# MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb" # Modify when test only
+# 3B
+# MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-3B-cold_start_20260519_epoch1-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb'
+
+# 7B
+MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb'
+
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
 LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
+echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
+echo "[log] DATA_ROOT=${DATA_ROOT}"
 echo "[log] MODEL_PATH (Reasoning + MemAdaptor)=${MODEL_PATH}"
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 # 训练 batch：须与 env.rollout.n（GRPO group）及数据量匹配
 train_data_size=16
-val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size
+val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size，注意测OOD时改成134
 group_size=8
 
 # 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
@@ -135,7 +167,6 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
-  --overwrite \
   --alfworld_eval_split eval_in_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
@@ -152,6 +183,9 @@ fi
 if [ -n "${EMBEDDING_API_KEY}" ]; then
   MEMORY_CLI+=(env.memory.embedding_api_key="${EMBEDDING_API_KEY}")
 fi
+
+
+append_retrieval_instruction_cli
 
 export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
 # Ray Job 里 WorkerDict/vLLM 进程默认拿不到提交机 shell 的 export，须放进 runtime_env.env_vars
@@ -218,13 +252,6 @@ else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)
 fi
 
-MEM_ADAPTOR_PHASES_CLI=()
-if [ "${MEM_ADAPTOR_USE_RECOMMENDED_PHASES}" = "1" ]; then
-  MEM_ADAPTOR_PHASES_CLI+=(
-    'env.memory.retrieval_mode_phases=[{global_step_start: 0, global_step_end: 50, mode: fixed}, {global_step_start: 50, global_step_end: null, mode: agentic}]'
-    'mem_adaptor.env_step_phases=[{global_step_start: 0, global_step_end: 50, env_step_start: 1, env_step_end: 51, env_step_every_n: 1}, {global_step_start: 51, global_step_end: null, env_step_start: null, env_step_end: null, env_step_every_n: 1}]'
-  )
-fi
 
 unset RAY_ADDRESS
 ray stop --force || true
@@ -269,8 +296,8 @@ python3 -m verl.trainer.main_ppo \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=true \
-      mem_adaptor.use_actor_rollout_wg=true \
+      mem_adaptor.enable=false \
+      mem_adaptor.use_actor_rollout_wg=false \
       mem_adaptor.train_memory_adaptor=false \
       mem_adaptor.model.path="${MODEL_PATH}" \
       env.env_name=alfworld/AlfredTWEnv \
@@ -278,6 +305,7 @@ python3 -m verl.trainer.main_ppo \
       env.seed=0 \
       env.max_steps=50 \
       env.memory.enabled="${MEMORY_ENABLED}" \
+      env.memory.store_dir="${MEMORY_STORE_DIR}" \
       env.memory.store_dir="${MEMORY_STORE_DIR}" \
       env.memory.write_back="${MEMORY_WRITE_BACK}" \
       env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
@@ -306,6 +334,6 @@ python3 -m verl.trainer.main_ppo \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=False \
-      trainer.val_only=False \
+      trainer.val_before_train=True \
+      trainer.val_only=True \
       "$@"

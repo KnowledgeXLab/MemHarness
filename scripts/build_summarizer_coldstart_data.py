@@ -14,11 +14,17 @@ By default, writes **merged** train/val: agent rows + summarizer rows (same spli
 Examples::
 
   python3 scripts/build_summarizer_coldstart_data.py --task alfworld \\
-    --output-dir data/MemAdaptor/cold_start/alfworld/mixed_agent_summarizer_20260519
+    --output-dir data/MemAdaptor/cold_start/alfworld/mixed_agent_summarizer_20260706
 
   python3 scripts/build_summarizer_coldstart_data.py --task webshop --schema compact \\
-    --output-dir data/MemAdaptor/cold_start/webshop/mixed_agent_summarizer_20260519 \\
+    --output-dir data/MemAdaptor/cold_start/webshop/mixed_agent_summarizer_20260706 \\
     --write-jsonl
+
+  # Cap agent + summarizer rows per split (0 = no cap):
+  python3 scripts/build_summarizer_coldstart_data.py --task alfworld \\
+    --max-agent-rows 200 --max-summarizer-rows 200 \\
+    --max-agent-rows-val 20 --max-summarizer-rows-val 20 \\
+    --output-dir data/MemAdaptor/cold_start/alfworld/mixed_sample200_20260519
 """
 
 from __future__ import annotations
@@ -377,6 +383,22 @@ def build_summarizer_rows_from_agent_df(
     return rows, dict(stats)
 
 
+def cap_dataframe_rows(
+    df: pd.DataFrame,
+    max_rows: int,
+    *,
+    seed: int,
+    label: str,
+    split_name: str,
+) -> pd.DataFrame:
+    """Randomly subsample to at most ``max_rows`` rows (``max_rows <= 0`` = keep all)."""
+    if max_rows <= 0 or df.empty or len(df) <= max_rows:
+        return df.reset_index(drop=True)
+    capped = df.sample(n=max_rows, random_state=seed).reset_index(drop=True)
+    print(f"[{split_name}] capped {label}: {len(df)} -> {len(capped)} (max={max_rows})")
+    return capped
+
+
 def merge_agent_and_summarizer(
     agent_df: pd.DataFrame,
     summ_df: pd.DataFrame,
@@ -438,6 +460,8 @@ def process_split(
     trajectory_head_turns: int,
     trajectory_tail_turns: int,
     max_rows: int,
+    max_agent_rows: int,
+    max_summarizer_rows: int,
     merge_agent: bool,
     seed: int,
     split_name: str,
@@ -456,13 +480,49 @@ def process_split(
         max_rows=max_rows,
     )
     summ_df = pd.DataFrame(summ_rows) if summ_rows else pd.DataFrame()
+    built_agent = len(agent_df)
+    built_summarizer = len(summ_df)
     print(
-        f"[{split_name}] agent={len(agent_df)} summarizer={len(summ_df)} "
+        f"[{split_name}] built agent={built_agent} summarizer={built_summarizer} "
         f"from {agent_parquet_path} stats={stats}"
     )
+    summ_df = cap_dataframe_rows(
+        summ_df,
+        max_summarizer_rows,
+        seed=seed,
+        label="summarizer",
+        split_name=split_name,
+    )
+    capped_summarizer = len(summ_df)
     if merge_agent:
-        return merge_agent_and_summarizer(agent_df, summ_df, seed=seed), stats
-    return summ_df, stats
+        agent_df = cap_dataframe_rows(
+            agent_df,
+            max_agent_rows,
+            seed=seed,
+            label="agent",
+            split_name=split_name,
+        )
+        capped_agent = len(agent_df)
+        out_df = merge_agent_and_summarizer(agent_df, summ_df, seed=seed)
+    else:
+        capped_agent = 0
+        out_df = summ_df
+
+    out_stats = dict(stats)
+    out_stats.update(
+        {
+            "agent_rows_built": built_agent,
+            "summarizer_rows_built": built_summarizer,
+            "agent_rows_capped": capped_agent,
+            "summarizer_rows_capped": capped_summarizer,
+            "output_rows": len(out_df),
+        }
+    )
+    print(
+        f"[{split_name}] capped agent={capped_agent} summarizer={capped_summarizer} "
+        f"output={len(out_df)}"
+    )
+    return out_df, out_stats
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -513,7 +573,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--max-rows",
         type=int,
         default=0,
-        help="Debug: process at most N rows per split (0 = all).",
+        help="Debug: scan at most N agent rows when building summarizer (0 = all).",
+    )
+    p.add_argument(
+        "--max-agent-rows",
+        type=int,
+        default=200,
+        help="Cap train agent rows after build (0 = no cap).",
+    )
+    p.add_argument(
+        "--max-summarizer-rows",
+        type=int,
+        default=200,
+        help="Cap train summarizer rows after build (0 = no cap).",
+    )
+    p.add_argument(
+        "--max-agent-rows-val",
+        type=int,
+        default=20,
+        help="Cap val agent rows after build (0 = no cap).",
+    )
+    p.add_argument(
+        "--max-summarizer-rows-val",
+        type=int,
+        default=20,
+        help="Cap val summarizer rows after build (0 = no cap).",
     )
     p.add_argument(
         "--trajectory-max-chars",
@@ -555,8 +639,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         seed=int(args.seed),
     )
 
-    train_df, train_stats = process_split(agent_train, split_name="train", **common_kw)
-    val_df, val_stats = process_split(agent_val, split_name="val", **common_kw)
+    train_df, train_stats = process_split(
+        agent_train,
+        split_name="train",
+        max_agent_rows=int(args.max_agent_rows),
+        max_summarizer_rows=int(args.max_summarizer_rows),
+        **common_kw,
+    )
+    val_df, val_stats = process_split(
+        agent_val,
+        split_name="val",
+        max_agent_rows=int(args.max_agent_rows_val),
+        max_summarizer_rows=int(args.max_summarizer_rows_val),
+        **common_kw,
+    )
 
     if train_df.empty and val_df.empty:
         raise SystemExit("No output rows; check agent parquets and memory-jsonl alignment.")
@@ -566,7 +662,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("Train data_kind counts:\n", train_df["data_kind"].value_counts().to_string())
     if "data_kind" in val_df.columns and len(val_df) > 0:
         print("Val data_kind counts:\n", val_df["data_kind"].value_counts().to_string())
-    print(f"Train summarizer built: {train_stats} | Val summarizer built: {val_stats}")
+    print(
+        "Train summarizer built="
+        f"{train_stats.get('summarizer_rows_built', train_stats.get('summarizer_rows'))}, "
+        f"capped={train_stats.get('summarizer_rows_capped')}, "
+        f"agent built={train_stats.get('agent_rows_built')}, "
+        f"capped={train_stats.get('agent_rows_capped')} "
+        f"| Val summarizer built="
+        f"{val_stats.get('summarizer_rows_built', val_stats.get('summarizer_rows'))}, "
+        f"capped={val_stats.get('summarizer_rows_capped')}, "
+        f"agent built={val_stats.get('agent_rows_built')}, "
+        f"capped={val_stats.get('agent_rows_capped')}"
+    )
     return 0
 
 

@@ -332,7 +332,7 @@ trainer:
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   # Validation JSONL: one object per trajectory; nested ``turns`` for each env step (see RayPPOTrainer._dump_validation_trajectories_jsonl).
   validation_data_dir: null
-  # If > 0, append every N **new** trajectories (by first-seen order) to ``{global_steps}_live.jsonl`` during validation.
+  # If > 0, append every N **new** trajectories (by first-seen order) to ``{global_steps}_live.jsonl`` durisave_freqng validation.
   # Full dump to ``{global_steps}.jsonl`` still runs once at the end. 0 = disabled.
   val_dump_every_n_trajs: 0
   nnodes: 1
@@ -496,8 +496,8 @@ env:
       partition: "" # Slurm -p (required when enable=true)
       account: null           # Slurm -A if needed
       exclude_nodes: ""       # Slurm --exclude (comma-separated hostnames)
-      cpus_per_task: 4
-      mem: "32G"
+      cpus_per_task: 8
+      mem: "64G"
       gres: null              # e.g. "gpu:0" if your site requires a GRES line
       apptainer_sif: ""       # e.g. /path/to/glibc_ubuntu22.sif; empty = no container (node must have new glibc)
       apptainer_binds: "/mnt:/mnt"
