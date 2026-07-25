@@ -55,7 +55,12 @@ MEMORY_ADAPTOR_INFOS_KEYS = frozenset(
     {"mem_adaptor_applied", "mem_adaptor_reject", "mem_adaptor_raw_output", "mem_adaptor_raw_outputs"}
 )
 MEMORY_ADAPTOR_STEP_NON_TENSOR_KEYS = frozenset(
-    {"mem_adaptor_applied", "mem_adaptor_reject", "mem_adaptor_raw_output"}
+    {
+        "mem_adaptor_applied",
+        "mem_adaptor_reject",
+        "mem_adaptor_raw_output",
+        "mem_adaptor_state_similarity_mean",
+    }
 )
 
 
@@ -73,6 +78,14 @@ def write_mem_adaptor_step_non_tensor_batch(batch, infos: list, batch_size: int)
         [infos[i].get("mem_adaptor_raw_output", "") for i in range(batch_size)],
         dtype=object,
     )
+    sim_vals = []
+    for i in range(batch_size):
+        raw = infos[i].get("mem_adaptor_state_similarity_mean")
+        try:
+            sim_vals.append(float(raw) if raw is not None else float("nan"))
+        except (TypeError, ValueError):
+            sim_vals.append(float("nan"))
+    batch.non_tensor_batch["mem_adaptor_state_similarity_mean"] = np.asarray(sim_vals, dtype=np.float64)
 
 
 class _DataProtoConfigMeta(type):

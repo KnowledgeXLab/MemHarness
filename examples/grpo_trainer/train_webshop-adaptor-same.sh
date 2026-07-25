@@ -24,7 +24,14 @@ cd "${REPO_ROOT}"
 export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
 
 # shellcheck source=memory_eval_helpers.sh
+if [[ ! -f "${SCRIPT_DIR}/memory_eval_helpers.sh" ]]; then
+  echo "[error] memory_eval_helpers.sh not found: ${SCRIPT_DIR}/memory_eval_helpers.sh" >&2
+  echo "[error] Submit from repo root: sbatch examples/grpo_trainer/train_webshop-adaptor-same.sh" >&2
+  exit 1
+fi
 source "${SCRIPT_DIR}/memory_eval_helpers.sh"
+
+
 REPO_DATA_DIR="$(resolve_repo_data_dir)" || exit 1
 setup_verl_agent_text_data_paths webshop || exit 1
 
@@ -43,6 +50,11 @@ RETRIEVE_KEY="memory_text"
 
 EMBEDDING_API_URL="http://10.140.37.28:8081/v1"
 EMBEDDING_API_KEY=""
+
+
+USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
+RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
+RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
 MEMORY_REMOTE_SLURM="True"
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
@@ -85,6 +97,7 @@ echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 train_data_size=16
 val_data_size=250
 group_size=8
+TOTAL_TRAINING_STEPS=200
 
 DATA_MAX_PROMPT_LENGTH=6144
 DATA_MAX_RESPONSE_LENGTH=512
@@ -274,6 +287,7 @@ ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
     trainer.save_best_val_metric="val/success_rate" \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
+    trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
     trainer.validation_data_dir="${EXP_DIR}/val_traj" \
     trainer.val_before_train=False \
     trainer.val_only=False \

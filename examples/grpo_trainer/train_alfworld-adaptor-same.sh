@@ -136,6 +136,7 @@ echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 train_data_size=16
 val_data_size=140  ## alfworld验证集只有140条数据，需要整除val_batch_size，注意测OOD时改成134
 group_size=8
+TOTAL_TRAINING_STEPS=200
 
 # 多轮只认 data.max_prompt_length；经验写回 summarizer 需要更大 prompt 预算时，必须同时抬高 vLLM max_model_len
 # （否则 summarizer 会被 clamp 到 max_model_len - response_length，见 experience_summarizer 警告）。
@@ -327,6 +328,7 @@ python3 -m verl.trainer.main_ppo \
       trainer.save_best_val_metric="val/success_rate" \
       trainer.test_freq=5 \
       trainer.total_epochs=150 \
+      trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
       trainer.val_before_train=True \
       trainer.val_only=False \

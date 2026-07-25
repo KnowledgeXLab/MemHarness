@@ -156,6 +156,15 @@ def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any
             if accepted_traj is not None and np.any(accepted_traj):
                 out["mem_adaptor/success_rate_when_accepted"] = float(np.mean(first_success[accepted_traj]))
 
+    if "mem_adaptor_state_similarity_mean" in ntb:
+        sim = np.asarray(ntb["mem_adaptor_state_similarity_mean"], dtype=np.float64).reshape(-1)
+        if sim.size >= n:
+            sim = sim[:n]
+            finite = sim[np.isfinite(sim)]
+            if finite.size > 0:
+                out["mem_adaptor/state_similarity_mean"] = float(np.mean(finite))
+                out["mem_adaptor/state_similarity_count"] = float(finite.size)
+
     return out
 
 

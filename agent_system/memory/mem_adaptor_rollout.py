@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 import random
 import re
 import sys
@@ -24,6 +25,7 @@ import verl.utils.torch_functional as verl_F
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
 from agent_system.memory.global_step_schedule import match_phase_for_global_step
+from agent_system.memory.state_embedding import batch_state_cosine_similarities
 
 
 def _mem_cfg(config: DictConfig) -> DictConfig:
@@ -235,6 +237,13 @@ def _extract_task_from_text(text: str) -> str:
     if not m:
         return ""
     return " ".join(m.group(1).strip().split())
+
+
+def _resolve_s_old_for_adaptor(ma: DictConfig, s_old: str) -> str:
+    """When ``include_retrieved_state`` is false, hide retrieved state from adaptor prompt (ablation)."""
+    if bool(ma.get("include_retrieved_state", True)):
+        return s_old
+    return str(ma.get("placeholder_old_state", "(none)"))
 
 
 def _build_adaptor_prompt(
@@ -524,6 +533,10 @@ def maybe_apply_memory_adaptor(
     row_env_indices: List[int] = []
     rows: List[dict] = []
     row_trace_meta: List[Dict[str, Any]] = []
+    sim_states_old: List[str] = []
+    sim_states_curr: List[str] = []
+    sim_row_indices: List[int] = []
+    log_state_similarity = bool(ma.get("log_adaptor_state_similarity", False))
     for i in range(batch_n):
         if not _should_run_adaptor_for_index(schedule, infos[i], active=bool(active_masks[i])):
             continue
@@ -560,12 +573,13 @@ def maybe_apply_memory_adaptor(
                 s_old = str(ma["placeholder_old_state"])
                 p_old = str(ma["placeholder_old_principle"])
 
+            s_old_for_prompt = _resolve_s_old_for_adaptor(ma, s_old)
             prompt = _build_adaptor_prompt(
                 tokenizer,
                 ma,
                 task=task,
                 s_curr=s_curr,
-                s_old=s_old,
+                s_old=s_old_for_prompt,
                 p_old=p_old,
                 apply_chat_template_kwargs=chat_kw,
             )
@@ -576,6 +590,7 @@ def maybe_apply_memory_adaptor(
                 pad_token_id=int(pad_token_id),
                 truncation=truncation,
             )
+            row_idx = len(rows)
             row_env_indices.append(i)
             rows.append(row)
             row_trace_meta.append(
@@ -584,9 +599,25 @@ def maybe_apply_memory_adaptor(
                     "task": task,
                     "s_curr": s_curr,
                     "s_old": s_old,
+                    "s_old_for_prompt": s_old_for_prompt,
                     "p_old": p_old,
                 }
             )
+            if log_state_similarity and (s_old or "").strip():
+                sim_states_old.append(s_old)
+                sim_states_curr.append(s_curr)
+                sim_row_indices.append(row_idx)
+
+    sim_by_row: Dict[int, float] = {}
+    if log_state_similarity and sim_states_old:
+        try:
+            row_similarities = batch_state_cosine_similarities(config, sim_states_old, sim_states_curr)
+            sim_by_row = {
+                int(row_idx): float(sim)
+                for row_idx, sim in zip(sim_row_indices, row_similarities)
+            }
+        except Exception as exc:
+            print(f"mem_adaptor: log_adaptor_state_similarity failed (skipped): {exc}", flush=True)
 
     if not rows:
         return
@@ -650,11 +681,23 @@ def maybe_apply_memory_adaptor(
 
     empty_retrieval_message = str(config.env.memory.empty_retrieval_message)
     grouped: Dict[int, List[str]] = defaultdict(list)
-    for env_i, line in zip(row_env_indices, dec):
+    grouped_sims: Dict[int, List[float]] = defaultdict(list)
+    for row_k, (env_i, line) in enumerate(zip(row_env_indices, dec)):
         grouped[env_i].append(line)
+        if row_k in sim_by_row:
+            sim_v = sim_by_row[row_k]
+            if math.isfinite(sim_v):
+                grouped_sims[env_i].append(sim_v)
     for env_i in sorted(grouped.keys()):
         raws = grouped[env_i]
         rep, reject = _replacement_from_many_raws(raws, ma, empty_retrieval_message)
+        sims = grouped_sims.get(env_i, [])
+        if sims:
+            infos[env_i]["mem_adaptor_state_similarities"] = list(sims)
+            infos[env_i]["mem_adaptor_state_similarity_mean"] = float(sum(sims) / len(sims))
+        else:
+            infos[env_i].pop("mem_adaptor_state_similarities", None)
+            infos[env_i].pop("mem_adaptor_state_similarity_mean", None)
         _patch_one_obs_text(
             texts=texts,
             i=env_i,
