@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-web-cold-7B-test
+#SBATCH --job-name=e05-web-adaptor-7b-no-rstate-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -7,8 +7,8 @@
 #SBATCH --quotatype=reserved
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=200G 
-#SBATCH --output=logs/mem_adaptor/webshop/cold_start_7b_test_%j.out
-#SBATCH --error=logs/mem_adaptor/webshop/cold_start_7b_test_%j.err
+#SBATCH --output=logs/mem_adaptor/webshop/adaptor_7b_no_retrieved_state_test_%j.out
+#SBATCH --error=logs/mem_adaptor/webshop/adaptor_7b_no_retrieved_state_test_%j.err
 
 set -x
 set -euo pipefail
@@ -25,8 +25,8 @@ export WANDB_MODE="offline"
 # MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260511/global_step_125'
 # MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260519/global_step_250'
 # MODEL_PATH='models/save_models/mem_adaptor/webshop/train_adaptor-same-7B-cold_start_20260519_epoch1-with_agentic_memory-retrieve_memory_text-self_distill/global_step_115/actor-hf'
-# MODEL_PATH='models/save_models/mem_adaptor/webshop/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/global_step_80/actor/huggingface'
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260706/global_step_400'
+MODEL_PATH='models/save_models/mem_adaptor/webshop/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/global_step_80/actor/huggingface'
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260706/global_step_400'
 
 
 trainer_n_gpus_per_node=2
@@ -59,7 +59,7 @@ num_cpus_per_env_worker=0.1
 
 TASK_NAME="webshop"
 
-MEMORY_ENABLED="False"
+MEMORY_ENABLED="True"
 MEMORY_WRITE_BACK="False"
 EXPERIENCE_SUMMARIZER_MODE="self"
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
@@ -90,7 +90,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-7B-cold_start_20260706_epoch2-step_80-no_adaptor-test"
+EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_80-no_retrieved_state-test"
 EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
@@ -111,7 +111,7 @@ TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_webshop_adaptor_same-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_webshop_adaptor_same_7b_no_retrieved_state-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
@@ -275,9 +275,10 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.use_invalid_action_penalty=True \
   actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
   algorithm.use_kl_in_reward=False \
-  mem_adaptor.enable=false \
-  mem_adaptor.use_actor_rollout_wg=true \
+  mem_adaptor.enable=True \
+  mem_adaptor.use_actor_rollout_wg=True \
   mem_adaptor.train_memory_adaptor=false \
+  mem_adaptor.include_retrieved_state=false \
   mem_adaptor.model.path="${MODEL_PATH}" \
   env.env_name=Webshop \
   env.seed=0 \

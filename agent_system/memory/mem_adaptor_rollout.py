@@ -66,12 +66,38 @@ def mem_adaptor_enabled(config: DictConfig) -> bool:
 
 
 def _normalize_adaptor_output(text: str, empty_markers: Sequence[str]) -> Tuple[str, bool]:
-    """Returns (stripped text, is_empty_reject)."""
-    t = text.strip()
+    """Returns (stripped text, is_empty_reject).
+
+    Rejects exact ``<EMPTY>`` markers and agent-rollout XML (think/action/memory tags), which indicate
+    the shared actor vLLM continued the env protocol instead of emitting an adapted principle.
+    """
+    t = (text or "").strip()
+    if not t:
+        return "", True
+
+    # Some shared-rollout models wrap the whole completion in a single <action>...</action>.
+    action_blocks = re.findall(r"<action>\s*(.*?)\s*</action>", t, flags=re.DOTALL | re.IGNORECASE)
+    if action_blocks and len(re.findall(r"<action>", t, flags=re.IGNORECASE)) == 1:
+        inner = action_blocks[0].strip()
+        if inner:
+            t = inner
+
     low = t.lower()
     for m in empty_markers:
         if t == m or low == m.lower():
             return "", True
+
+    agent_protocol = re.compile(
+        r"<\s*(?:redacted_thinking|action|memory_retrieve|memory)\b",
+        re.IGNORECASE,
+    )
+    if agent_protocol.search(t) or "\nassistant" in low or re.match(r"^assistant\b", low):
+        return "", True
+
+    # Truncate accidental multi-turn continuation (Qwen chat template artifact).
+    t = re.split(r"\nassistant\b", t, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not t:
+        return "", True
     return t, False
 
 
@@ -148,6 +174,8 @@ def _maybe_log_adaptor_io_trace(
             f"  task   ({len(meta.get('task', ''))} chars): {_trunc_one_line(meta.get('task', ''), max_c)}\n"
             f"  s_curr ({len(meta['s_curr'])} chars): {_trunc_one_line(meta['s_curr'], max_c)}\n"
             f"  s_old  ({len(meta['s_old'])} chars): {_trunc_one_line(meta['s_old'], max_c)}\n"
+            f"  s_old_for_prompt ({len(meta.get('s_old_for_prompt', meta['s_old']))} chars): "
+            f"{_trunc_one_line(meta.get('s_old_for_prompt', meta['s_old']), max_c)}\n"
             f"  p_old  ({len(meta['p_old'])} chars): {_trunc_one_line(meta['p_old'], max_c)}\n"
             f"  injected_snippet ({len(inj)} chars): {_trunc_one_line(inj, max_c)}\n"
             f"  adaptor_raw ({len(raw)} chars): {_trunc_one_line(raw, max_c)}\n"
