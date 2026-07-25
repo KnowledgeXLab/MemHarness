@@ -4,6 +4,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from typing import Sequence
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -511,6 +512,21 @@ class MemoryManager:
         )
         self._maybe_run_experience_utility_maintenance(trainer_global_step)
         return []
+
+    def sample_random_state_texts(
+        self,
+        n: int,
+        exclude_memory_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Sample decoy ``state_text`` rows from the memory store (for adaptor ablations)."""
+        need = max(0, int(n))
+        if need == 0 or not self.enabled or self.store is None:
+            return [""] * need
+        try:
+            return self.store.sample_random_state_texts(need, exclude_memory_ids=exclude_memory_ids)
+        except Exception as exc:
+            print(f"memory.sample_random_state_texts failed (returning empty): {exc}", flush=True)
+            return [""] * need
 
     def close(self) -> None:
         if self.store is not None:

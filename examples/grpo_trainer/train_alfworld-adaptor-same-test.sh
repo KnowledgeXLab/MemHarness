@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-alf-adaptor-7b-no-rstate-test
+#SBATCH --job-name=e05-alf-adaptor-7b-random-state-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --quotatype=reserved
 #SBATCH --mem=200G 
-#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_7b_no_retrieved_state_test_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_7b_no_retrieved_state_test_%j.err
+#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_7b_random_state_test_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_7b_random_state_test_%j.err
 
 
 set -x
@@ -104,7 +104,7 @@ EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
 
-EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_170-no_retrieved_state-test"
+EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_170-random_state-test"
 # EXPERIMENT_NAME="train_adaptor-same-1.5B-cold_start_20260519_epoch1"
 # EXPERIMENT_NAME="train_adaptor-same-7B-new"
 EXPERIMENTS_ROOT="${REPO_DATA_DIR}/MemAdaptor/exp_results"
@@ -130,7 +130,7 @@ MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-7B-col
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same_7b_no_retrieved_state-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same_7b_random_state-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
@@ -299,7 +299,7 @@ python3 -m verl.trainer.main_ppo \
       mem_adaptor.enable=True \
       mem_adaptor.use_actor_rollout_wg=True \
       mem_adaptor.train_memory_adaptor=false \
-      mem_adaptor.include_retrieved_state=false \
+      mem_adaptor.retrieved_state_mode=random_vdb \
       mem_adaptor.model.path="${MODEL_PATH}" \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \

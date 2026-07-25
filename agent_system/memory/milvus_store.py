@@ -7,6 +7,7 @@ import os
 import re
 import time
 from typing import Iterable
+import random
 
 from .experience_utility import (
     UTILITY_SCORE_KEY,
@@ -690,6 +691,66 @@ class MilvusMemoryStore:
         except Exception as exc:
             self.logger.warning("count_records failed collection=%s err=%s", self.collection_name, exc)
         return -1
+
+    def sample_random_state_texts(
+        self,
+        n: int,
+        exclude_memory_ids: Iterable[str] | None = None,
+        max_attempts: int | None = None,
+    ) -> list[str]:
+        """Sample up to ``n`` distinct ``state_text`` rows uniformly (offset-based), excluding given memory ids."""
+        need = max(0, int(n))
+        if need == 0:
+            return []
+
+        client = self._ensure_client()
+        if self.collection_name not in set(client.list_collections()):
+            return [""] * need
+
+        exclude = {str(x).strip() for x in (exclude_memory_ids or []) if str(x).strip()}
+        filter_expr = self._scoped_search_filter_expr()
+        n_total = self.count_records()
+        if n_total <= 0:
+            return [""] * need
+
+        attempts_limit = int(max_attempts) if max_attempts is not None else max(20, need * 12)
+        found: list[str] = []
+        seen_ids: set[str] = set()
+        attempts = 0
+        while len(found) < need and attempts < attempts_limit:
+            attempts += 1
+            offset = random.randint(0, max(0, n_total - 1))
+            try:
+                rows = client.query(
+                    collection_name=self.collection_name,
+                    filter=filter_expr,
+                    output_fields=["memory_id", "state_text"],
+                    limit=1,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "sample_random_state_texts query failed collection=%s offset=%s err=%s",
+                    self.collection_name,
+                    offset,
+                    exc,
+                )
+                continue
+            if not rows:
+                continue
+            row = rows[0]
+            memory_id = str(row.get("memory_id") or "").strip()
+            if not memory_id or memory_id in exclude or memory_id in seen_ids:
+                continue
+            state_text = str(row.get("state_text") or "").strip()
+            if not state_text:
+                continue
+            seen_ids.add(memory_id)
+            found.append(state_text)
+
+        while len(found) < need:
+            found.append("")
+        return found[:need]
 
     def close(self) -> None:
         if self._client is None:

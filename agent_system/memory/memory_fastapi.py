@@ -106,4 +106,24 @@ def create_memory_fastapi_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.post("/memories/sample_random")
+    async def memories_sample_random(body: dict) -> JSONResponse:
+        try:
+            n = int(body.get("n", 0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="n must be an integer") from exc
+        raw_exclude = body.get("exclude_memory_ids", [])
+        if raw_exclude is None:
+            raw_exclude = []
+        if not isinstance(raw_exclude, list):
+            raise HTTPException(status_code=400, detail="exclude_memory_ids must be a list")
+        exclude = [str(x) for x in raw_exclude if str(x).strip()]
+        try:
+            with lock:
+                states = store.sample_random_state_texts(n, exclude_memory_ids=exclude)
+            items = [{"state_text": st} for st in states]
+            return JSONResponse(content={"items": items})
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     return app

@@ -101,12 +101,12 @@ def _normalize_adaptor_output(text: str, empty_markers: Sequence[str]) -> Tuple[
     return t, False
 
 
-def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tuple[str, str]]:
-    """S_old, P_old pairs from MemoryEvent.to_dict()['retrieved'][:top_k]."""
+def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tuple[str, str, str]]:
+    """S_old, P_old, memory_id tuples from MemoryEvent.to_dict()['retrieved'][:top_k]."""
     if not memory_event or not isinstance(memory_event, dict) or top_k <= 0:
         return []
     ret = memory_event["retrieved"] or []
-    out: List[Tuple[str, str]] = []
+    out: List[Tuple[str, str, str]] = []
     for r in ret[:top_k]:
         if not isinstance(r, dict):
             continue
@@ -114,6 +114,7 @@ def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tupl
             (
                 str(r["state_text"]),
                 str(r["memory_text"]),
+                str(r.get("memory_id") or ""),
             )
         )
     return out
@@ -121,7 +122,9 @@ def _retrieved_state_principle_pairs(memory_event: Any, top_k: int) -> List[Tupl
 
 def _top1_retrieved_fields(memory_event: Any) -> Tuple[str, str]:
     pairs = _retrieved_state_principle_pairs(memory_event, 1)
-    return pairs[0] if pairs else ("", "")
+    if not pairs:
+        return "", ""
+    return pairs[0][0], pairs[0][1]
 
 
 def _trunc_one_line(s: str, max_chars: int) -> str:
@@ -170,7 +173,8 @@ def _maybe_log_adaptor_io_trace(
         gs = "" if trainer_global_step is None else str(int(trainer_global_step))
         print(
             "[mem_adaptor.debug_io] "
-            f"global_step={gs} traj_uid={tu} env_i={env_i} n_retrieved={n_ret} normalize_reject={rej}\n"
+            f"global_step={gs} traj_uid={tu} env_i={env_i} n_retrieved={n_ret} "
+            f"retrieved_state_mode={meta.get('retrieved_state_mode', '')} normalize_reject={rej}\n"
             f"  task   ({len(meta.get('task', ''))} chars): {_trunc_one_line(meta.get('task', ''), max_c)}\n"
             f"  s_curr ({len(meta['s_curr'])} chars): {_trunc_one_line(meta['s_curr'], max_c)}\n"
             f"  s_old  ({len(meta['s_old'])} chars): {_trunc_one_line(meta['s_old'], max_c)}\n"
@@ -267,10 +271,53 @@ def _extract_task_from_text(text: str) -> str:
     return " ".join(m.group(1).strip().split())
 
 
-def _resolve_s_old_for_adaptor(ma: DictConfig, s_old: str) -> str:
-    """When ``include_retrieved_state`` is false, hide retrieved state from adaptor prompt (ablation)."""
-    if bool(ma.get("include_retrieved_state", True)):
+_RETRIEVED_STATE_MODES = frozenset({"matched", "placeholder", "random_vdb"})
+
+
+def _resolve_retrieved_state_mode(ma: DictConfig) -> str:
+    """How adaptor prompt fills ``{s_old}``: matched | placeholder | random_vdb."""
+    raw = ma.get("retrieved_state_mode")
+    if raw is None or not str(raw).strip():
+        return "matched"
+    mode = str(raw).strip().lower()
+    if mode in _RETRIEVED_STATE_MODES:
+        return mode
+    print(f"mem_adaptor: unknown retrieved_state_mode={mode!r}, falling back to matched", flush=True)
+    return "matched"
+
+
+def _fetch_decoy_states(
+    memory_manager: Any,
+    ma: DictConfig,
+    pending_jobs: Sequence[Dict[str, Any]],
+) -> List[str]:
+    n = len(pending_jobs)
+    if n == 0 or _resolve_retrieved_state_mode(ma) != "random_vdb":
+        return [""] * n
+    if memory_manager is None or not bool(getattr(memory_manager, "enabled", False)):
+        print("mem_adaptor: retrieved_state_mode=random_vdb but memory manager unavailable", flush=True)
+        return [""] * n
+    exclude = [
+        str(job.get("memory_id") or "").strip()
+        for job in pending_jobs
+        if str(job.get("memory_id") or "").strip()
+    ]
+    try:
+        return memory_manager.sample_random_state_texts(n, exclude_memory_ids=exclude)
+    except Exception as exc:
+        print(f"mem_adaptor: sample_random_state_texts failed (skipped): {exc}", flush=True)
+        return [""] * n
+
+
+def _resolve_s_old_for_adaptor(ma: DictConfig, s_old: str, *, decoy_state: str = "") -> str:
+    mode = _resolve_retrieved_state_mode(ma)
+    if mode == "matched":
         return s_old
+    if mode == "random_vdb":
+        decoy = (decoy_state or "").strip()
+        if decoy:
+            return decoy
+        return str(ma.get("placeholder_old_state", "(none)"))
     return str(ma.get("placeholder_old_state", "(none)"))
 
 
@@ -521,6 +568,7 @@ def maybe_apply_memory_adaptor(
     traj_uid: Optional[np.ndarray] = None,
     grpo_group_uid: Optional[np.ndarray] = None,
     step_rewards: Optional[np.ndarray] = None,
+    memory_manager: Any = None,
 ) -> None:
     """
     After ``step_with_memory``, optionally run batched Adaptor ``generate_sequences`` and
@@ -564,7 +612,9 @@ def maybe_apply_memory_adaptor(
     sim_states_old: List[str] = []
     sim_states_curr: List[str] = []
     sim_row_indices: List[int] = []
+    pending_jobs: List[Dict[str, Any]] = []
     log_state_similarity = bool(ma.get("log_adaptor_state_similarity", False))
+    retrieved_state_mode = _resolve_retrieved_state_mode(ma)
     for i in range(batch_n):
         if not _should_run_adaptor_for_index(schedule, infos[i], active=bool(active_masks[i])):
             continue
@@ -587,54 +637,76 @@ def maybe_apply_memory_adaptor(
                 continue
             if not pairs and injected:
                 # memory injected without structured retrieved list — single adaptor call with empty S_old/P_old
-                pairs = [("", "")]
+                pairs = [("", "", "")]
 
         if not pairs and schedule == "every_step":
             ph_s = str(ma["placeholder_old_state"])
             ph_p = str(ma["placeholder_old_principle"])
-            pairs = [(ph_s, ph_p)]
+            pairs = [(ph_s, ph_p, "")]
 
-        for s_old, p_old in pairs:
+        for s_old, p_old, memory_id in pairs:
             if schedule == "on_memory_only" and not (s_old or p_old) and not infos[i]["memory_injected_text"].strip():
                 continue
             if not s_old and not p_old and schedule == "every_step":
                 s_old = str(ma["placeholder_old_state"])
                 p_old = str(ma["placeholder_old_principle"])
 
-            s_old_for_prompt = _resolve_s_old_for_adaptor(ma, s_old)
-            prompt = _build_adaptor_prompt(
-                tokenizer,
-                ma,
-                task=task,
-                s_curr=s_curr,
-                s_old=s_old_for_prompt,
-                p_old=p_old,
-                apply_chat_template_kwargs=chat_kw,
-            )
-            row = _row_dict_from_prompt(
-                tokenizer=tokenizer,
-                prompt=prompt,
-                max_prompt_length=max_prompt_length,
-                pad_token_id=int(pad_token_id),
-                truncation=truncation,
-            )
-            row_idx = len(rows)
-            row_env_indices.append(i)
-            rows.append(row)
-            row_trace_meta.append(
+            pending_jobs.append(
                 {
                     "env_i": i,
                     "task": task,
                     "s_curr": s_curr,
                     "s_old": s_old,
-                    "s_old_for_prompt": s_old_for_prompt,
                     "p_old": p_old,
+                    "memory_id": memory_id,
                 }
             )
-            if log_state_similarity and (s_old or "").strip():
-                sim_states_old.append(s_old)
-                sim_states_curr.append(s_curr)
-                sim_row_indices.append(row_idx)
+
+    decoy_states = _fetch_decoy_states(memory_manager, ma, pending_jobs)
+
+    for job_idx, job in enumerate(pending_jobs):
+        i = int(job["env_i"])
+        s_old = str(job["s_old"])
+        p_old = str(job["p_old"])
+        s_curr = str(job["s_curr"])
+        task = str(job["task"])
+        decoy = decoy_states[job_idx] if job_idx < len(decoy_states) else ""
+        s_old_for_prompt = _resolve_s_old_for_adaptor(ma, s_old, decoy_state=decoy)
+        prompt = _build_adaptor_prompt(
+            tokenizer,
+            ma,
+            task=task,
+            s_curr=s_curr,
+            s_old=s_old_for_prompt,
+            p_old=p_old,
+            apply_chat_template_kwargs=chat_kw,
+        )
+        row = _row_dict_from_prompt(
+            tokenizer=tokenizer,
+            prompt=prompt,
+            max_prompt_length=max_prompt_length,
+            pad_token_id=int(pad_token_id),
+            truncation=truncation,
+        )
+        row_idx = len(rows)
+        row_env_indices.append(i)
+        rows.append(row)
+        row_trace_meta.append(
+            {
+                "env_i": i,
+                "task": task,
+                "s_curr": s_curr,
+                "s_old": s_old,
+                "s_old_for_prompt": s_old_for_prompt,
+                "p_old": p_old,
+                "memory_id": job.get("memory_id", ""),
+                "retrieved_state_mode": retrieved_state_mode,
+            }
+        )
+        if log_state_similarity and (s_old or "").strip():
+            sim_states_old.append(s_old)
+            sim_states_curr.append(s_curr)
+            sim_row_indices.append(row_idx)
 
     sim_by_row: Dict[int, float] = {}
     if log_state_similarity and sim_states_old:

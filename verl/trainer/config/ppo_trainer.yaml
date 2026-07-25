@@ -556,8 +556,8 @@ mem_adaptor:
   use_actor_rollout_wg: false   # false -> second Role on mem_adaptor_pool (see verl/trainer/main_ppo.py)
   retrieval_top_k: 1   # take top-k retrieved (S_old,P_old) hits; one batched generate; merges non-EMPTY outputs
   multi_hit_joiner: "\n\n"   # between accepted adapted principles when retrieval_top_k > 1
-  # When false, adaptor prompt omits each hit's retrieved state_text and uses placeholder_old_state instead (A/B ablation).
-  include_retrieved_state: true
+  # Adaptor prompt {s_old} source: matched=retrieved state; placeholder=placeholder_old_state; random_vdb=random VDB state (exclude current memory_id).
+  retrieved_state_mode: matched   # matched | placeholder | random_vdb
   # Rollout: embed retrieved state_text vs current state (cosine sim) when memory is retrieved for adaptor rewrite.
   log_adaptor_state_similarity: true
   # Optimize Memory Adaptor with GRPO (episode return on adaptor completions). Requires mem_adaptor.enable=true,

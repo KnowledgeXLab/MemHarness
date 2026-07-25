@@ -563,6 +563,7 @@ class TrajectoryCollector:
                 traj_uid=traj_uid,
                 grpo_group_uid=uid_batch,
                 step_rewards=torch_to_numpy(rewards),
+                memory_manager=getattr(envs, "retrieval_memory", None),
             )
             write_mem_adaptor_step_non_tensor_batch(batch, infos, batch_size)
 

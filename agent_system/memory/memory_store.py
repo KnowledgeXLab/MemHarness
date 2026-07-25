@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import requests
 
@@ -36,6 +36,15 @@ class BaseMemoryStore:
     def count_records(self) -> int:
         """Row count in the vector collection, or -1 if unsupported / unknown."""
         return -1
+
+    def sample_random_state_texts(
+        self,
+        n: int,
+        exclude_memory_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Return up to ``n`` random ``state_text`` values (empty strings pad failures)."""
+        del exclude_memory_ids
+        return [""] * max(0, int(n))
 
     def close(self) -> None:
         raise NotImplementedError
@@ -167,6 +176,34 @@ class RemoteHTTPMemoryStore(BaseMemoryStore):
             pass
         return -1
 
+    def sample_random_state_texts(
+        self,
+        n: int,
+        exclude_memory_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        if n <= 0:
+            return []
+        response = self._http.post(
+            f"{self.base_url}/memories/sample_random",
+            json={
+                "n": int(n),
+                "exclude_memory_ids": [str(x) for x in (exclude_memory_ids or []) if str(x).strip()],
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return [""] * int(n)
+        out: list[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                out.append(str(item.get("state_text") or ""))
+        while len(out) < int(n):
+            out.append("")
+        return out[: int(n)]
+
     def close(self) -> None:
         return
 
@@ -263,6 +300,13 @@ class MemoryStoreDispatcher(BaseMemoryStore):
 
     def count_records(self) -> int:
         return self.backend.count_records()
+
+    def sample_random_state_texts(
+        self,
+        n: int,
+        exclude_memory_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        return self.backend.sample_random_state_texts(n, exclude_memory_ids=exclude_memory_ids)
 
     def close(self) -> None:
         self.backend.close()

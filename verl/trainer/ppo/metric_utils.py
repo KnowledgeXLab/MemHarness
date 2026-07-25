@@ -92,10 +92,13 @@ def _reward_decomposition_metrics(batch: DataProto) -> Dict[str, Any]:
 def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any]) -> Dict[str, Any]:
     """MemAdaptor diagnostics from ``write_mem_adaptor_step_non_tensor_batch`` (actor rollout / inference).
 
-    Report trajectory-level counts, not per-step rates:
+    Report trajectory-level counts and call-level adaptor rates:
 
     - ``*_count_per_traj_mean``: average number of rows per trajectory where the event happened.
     - ``*_traj_count``: number of trajectories where the event happened at least once.
+    - ``reject_rate`` / ``accept_rate``: call-level fractions over all adaptor-applied env steps
+      (``sum(reject) / sum(applied)`` and ``sum(accept) / sum(applied)``; with ``retrieval_top_k=1``
+      these match per-reconstruction reject/accept rates).
     - conditional success rates are trajectory-level: each trajectory contributes once.
     """
     out: Dict[str, Any] = {}
@@ -134,6 +137,12 @@ def compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb: Dict[str, Any
         out["mem_adaptor/rejected_traj_count"] = float(np.sum(rejected_traj))
         out["mem_adaptor/accepted_count_per_traj_mean"] = float(np.mean(sums_acc))
         out["mem_adaptor/accepted_traj_count"] = float(np.sum(accepted_traj))
+        total_applied = float(np.sum(sums_a))
+        if total_applied > 0.0:
+            total_reject = float(np.sum(sums_r))
+            total_accept = float(np.sum(sums_acc))
+            out["mem_adaptor/reject_rate"] = total_reject / total_applied
+            out["mem_adaptor/accept_rate"] = total_accept / total_applied
     else:
         rejected_traj = None
         accepted_traj = None
@@ -251,9 +260,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
               (injection + memory_query steps; see rollout_loop).
             - memory/retrieve_* , memory/vdb_row_count, etc.: from ``batch.meta_info["memory_rollout_metrics"]``
               (VDB timing, row count, write-back); logged in the same step as training metrics.
-            - mem_adaptor/*_count_per_traj_mean and trajectory-level conditional success rates: from
-              ``batch.non_tensor_batch`` when MemAdaptor writes step diagnostics (inference rollout;
-              independent of ``train_memory_adaptor``).
+            - mem_adaptor/*_count_per_traj_mean, ``mem_adaptor/reject_rate``, ``mem_adaptor/accept_rate``,
+              and trajectory-level conditional success rates: from ``batch.non_tensor_batch`` when MemAdaptor
+              writes step diagnostics (inference rollout; independent of ``train_memory_adaptor``).
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)

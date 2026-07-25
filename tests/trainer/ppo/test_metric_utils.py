@@ -25,6 +25,7 @@ from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
     compute_data_metrics,
+    compute_mem_adaptor_rollout_metrics_from_non_tensor_batch,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -313,6 +314,22 @@ class TestProcessValidationMetrics(unittest.TestCase):
         
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
+
+
+class TestMemAdaptorRolloutMetrics(unittest.TestCase):
+    def test_call_level_reject_and_accept_rates(self):
+        ntb = {
+            "traj_uid": np.array(["t1", "t1", "t2"], dtype=object),
+            "mem_adaptor_applied": np.array([True, True, True], dtype=bool),
+            "mem_adaptor_reject": np.array([True, False, True], dtype=bool),
+        }
+        out = compute_mem_adaptor_rollout_metrics_from_non_tensor_batch(ntb)
+        self.assertAlmostEqual(out["mem_adaptor/reject_rate"], 2.0 / 3.0)
+        self.assertAlmostEqual(out["mem_adaptor/accept_rate"], 1.0 / 3.0)
+        self.assertAlmostEqual(
+            out["mem_adaptor/reject_rate"] + out["mem_adaptor/accept_rate"],
+            1.0,
+        )
 
 
 if __name__ == "__main__":
