@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-alf-adaptor-7b-random-state-test
+#SBATCH --job-name=e05-alf-adaptor-7b-ood-no_memory-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:2
+#SBATCH --exclude=SH-IDC1-10-140-37-55
 #SBATCH --cpus-per-task=32
-#SBATCH --quotatype=reserved
+#SBATCH --quotatype=spot
 #SBATCH --mem=200G 
-#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_7b_random_state_test_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_7b_random_state_test_%j.err
+#SBATCH --output=logs/mem_adaptor/alfworld/adaptor_7b_ood_no_memory_test_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/adaptor_7b_ood_no_memory_test_%j.err
 
 
 set -x
@@ -70,7 +71,7 @@ num_cpus_per_env_worker=0.1
 
 TASK_NAME="alfworld"
 
-MEMORY_ENABLED=True
+MEMORY_ENABLED=False
 MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
@@ -104,7 +105,7 @@ EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
 
-EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_170-random_state-test"
+EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_170-ood-no_memory-test"
 # EXPERIMENT_NAME="train_adaptor-same-1.5B-cold_start_20260519_epoch1"
 # EXPERIMENT_NAME="train_adaptor-same-7B-new"
 EXPERIMENTS_ROOT="${REPO_DATA_DIR}/MemAdaptor/exp_results"
@@ -130,7 +131,7 @@ MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-7B-col
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same_7b_random_state-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same_7b_ood_no_memory-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
@@ -167,7 +168,7 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
-  --alfworld_eval_split eval_in_distribution \
+  --alfworld_eval_split eval_out_of_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 MEMORY_CLI=()
@@ -296,10 +297,9 @@ python3 -m verl.trainer.main_ppo \
       actor_rollout_ref.actor.use_invalid_action_penalty=True \
       actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
       algorithm.use_kl_in_reward=False \
-      mem_adaptor.enable=True \
+      mem_adaptor.enable=false \
       mem_adaptor.use_actor_rollout_wg=True \
       mem_adaptor.train_memory_adaptor=false \
-      mem_adaptor.retrieved_state_mode=random_vdb \
       mem_adaptor.model.path="${MODEL_PATH}" \
       env.env_name=alfworld/AlfredTWEnv \
       env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \

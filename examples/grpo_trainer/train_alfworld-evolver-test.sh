@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-alf-evolver
+#SBATCH --job-name=e05-alf-evolver-ood-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=500G 
-#SBATCH --output=logs/mem_adaptor/alfworld/evolver_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/evolver_%j.err
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=32
+#SBATCH --quotatype=spot
+#SBATCH --mem=200G 
+#SBATCH --output=logs/mem_adaptor/alfworld/evolver_ood_test_%j.out
+#SBATCH --error=logs/mem_adaptor/alfworld/evolver_ood_test_%j.err
 
 
 set -x
@@ -20,16 +21,17 @@ ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
-export WANDB_MODE="online"
+export WANDB_MODE="offline"
 
 # 单一 checkpoint：同时作为 actor_rollout_ref.model.path 与 mem_adaptor.model.path
 # MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 # MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-step190-hf'
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260706/global_step_400'
+# MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260706/global_step_400'
+MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_evolver-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/global_step_200/actor/huggingface'
 
 
 # global_pool：Reasoning（vLLM+FSDP actor/ref 等）每节点 GPU 数
-trainer_n_gpus_per_node=8
+trainer_n_gpus_per_node=2
 GPU_NUM="${trainer_n_gpus_per_node}"
 # MemAdaptor GPU：仅当 mem_adaptor.use_actor_rollout_wg=false 时，main_ppo 才会注册 mem_adaptor_pool 并占用
 # mem_adaptor.resource_pool_gpus_per_node（见 verl/trainer/main_ppo.py::_mem_adaptor_dedicated_rollout_wg）。
@@ -65,7 +67,7 @@ num_cpus_per_env_worker=0.1
 TASK_NAME="alfworld"
 
 MEMORY_ENABLED=True
-MEMORY_WRITE_BACK=True
+MEMORY_WRITE_BACK=False
 EXPERIENCE_SUMMARIZER_MODE="self" # none | self | teacher
 # full=多字段 JSON（适合强模型/teacher）；compact=只让模型写 memory_text，state/action 从轨迹回填（适合小模型自蒸馏）
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
@@ -73,7 +75,7 @@ RETRIEVAL_MODE="agentic" # agentic | fixed（EvolveR 在线阶段常用 agentic 
 RETRIEVE_KEY="memory_text"
 # EMBEDDING_API_URL="http://10.140.37.18:8887/v1"
 # EMBEDDING_API_KEY="DataFrontier_bge_m3"
-EMBEDDING_API_URL="http://10.140.37.3:8081/v1"
+EMBEDDING_API_URL="http://10.140.37.55:8081/v1"
 EMBEDDING_API_KEY="DataFrontier_bge_m3"
 
 USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
@@ -82,7 +84,7 @@ RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
 MEMORY_REMOTE_SLURM=True
 MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
-MEMORY_REMOTE_SERVER_PORT="8768"
+MEMORY_REMOTE_SERVER_PORT="8765"
 # 远程起 VDB 的 sbatch：Slurm --exclude，逗号分隔；Hydra 需整段加引号，见下方 REMOTE_VDB_CLI
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
@@ -97,7 +99,7 @@ EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_evolver-7B-cold_start_20260706_epoch2"
+EXPERIMENT_NAME="train_evolver-7B-cold_start_20260706_epoch2-ood-test"
 
 EXPERIMENTS_ROOT="${REPO_DATA_DIR}/MemAdaptor/exp_results"
 
@@ -110,12 +112,15 @@ else
 fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
-MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
+# MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
+
+MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_evolver-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb'
+
 TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/alfworld/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_same-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_alfworld_evolver-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
@@ -152,7 +157,7 @@ python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
   --infer_alfworld_sizes \
-  --alfworld_eval_split eval_in_distribution \
+  --alfworld_eval_split eval_out_of_distribution \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 MEMORY_CLI=()
@@ -319,6 +324,6 @@ python3 -m verl.trainer.main_ppo \
       trainer.total_epochs=150 \
       trainer.total_training_steps=200 \
       trainer.validation_data_dir="${EXP_DIR}/val_traj" \
-      trainer.val_before_train=False \
-      trainer.val_only=False \
+      trainer.val_before_train=True \
+      trainer.val_only=True \
       "$@"

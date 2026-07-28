@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=e05-alf-7b-general_adaptor-test
+#SBATCH --job-name=e05-web-7b-general_adaptor-test
 #SBATCH --partition=DataFrontier_Explore
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -7,14 +7,13 @@
 #SBATCH --quotatype=reserved
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=200G 
-#SBATCH --output=logs/mem_adaptor/alfworld/general_adaptor_7b_test_%j.out
-#SBATCH --error=logs/mem_adaptor/alfworld/general_adaptor_7b_test_%j.err
-
+#SBATCH --output=logs/mem_adaptor/webshop/general_adaptor_7b_test_%j.out
+#SBATCH --error=logs/mem_adaptor/webshop/general_adaptor_7b_test_%j.err
 
 set -x
 set -euo pipefail
 
-mkdir -p logs/mem_adaptor/alfworld
+mkdir -p logs/mem_adaptor/webshop
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -22,16 +21,15 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="offline"
 
-# Reasoning actor：与 train_alfworld-adaptor-same-test.sh 相同 checkpoint
-REASONING_MODEL_PATH='models/save_models/mem_adaptor/alfworld/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/best_val/global_step_170/actor/huggingface'
-# MemAdaptor 专用池：通用 Qwen2.5-7B-Instruct
+# Reasoning actor：与 train_webshop-adaptor-same-test.sh 相同 checkpoint
+REASONING_MODEL_PATH='models/save_models/mem_adaptor/webshop/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/global_step_80/actor/huggingface'
+# MemAdaptor 专用池：通用 Qwen2.5-7B-Instruct（与 same-test 里共用的 trained checkpoint 分离）
 MEM_ADAPTOR_MODEL_PATH="models/public_models/Qwen2.5-7B-Instruct"
 
 trainer_n_gpus_per_node=2
 mem_adaptor_gpus_per_node=2
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-  # sbatch 会把脚本复制到 /var/spool/slurmd/job*/slurm_script，BASH_SOURCE 不是仓库路径
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
   SCRIPT_DIR="${REPO_ROOT}/examples/grpo_trainer"
 else
@@ -44,21 +42,22 @@ export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
 # shellcheck source=memory_eval_helpers.sh
 if [[ ! -f "${SCRIPT_DIR}/memory_eval_helpers.sh" ]]; then
   echo "[error] memory_eval_helpers.sh not found: ${SCRIPT_DIR}/memory_eval_helpers.sh" >&2
-  echo "[error] Submit from repo root: sbatch examples/grpo_trainer/train_alfworld-adaptor-local-test.sh" >&2
+  echo "[error] Submit from repo root: sbatch examples/grpo_trainer/train_webshop-adaptor-local-test.sh" >&2
   exit 1
 fi
 source "${SCRIPT_DIR}/memory_eval_helpers.sh"
 
 REPO_DATA_DIR="$(resolve_repo_data_dir)" || exit 1
-setup_verl_agent_text_data_paths alfworld || exit 1
+setup_verl_agent_text_data_paths webshop || exit 1
 
 export WANDB_DIR='wandb_logs'
 
 num_cpus_per_env_worker=0.1
 
-TASK_NAME="alfworld"
-MEMORY_ENABLED=True
-MEMORY_WRITE_BACK=False
+TASK_NAME="webshop"
+
+MEMORY_ENABLED="True"
+MEMORY_WRITE_BACK="False"
 EXPERIENCE_SUMMARIZER_MODE="self"
 EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic"
@@ -71,9 +70,9 @@ USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
 RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
 RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
-MEMORY_REMOTE_SLURM=True
-MEMORY_REMOTE_PARTITION="p-cpu-new"
-MEMORY_REMOTE_SERVER_PORT="8768"
+MEMORY_REMOTE_SLURM="True"
+MEMORY_REMOTE_PARTITION="p-cpu-new"  # DataFrontier_Explore / p-cpu-new
+MEMORY_REMOTE_SERVER_PORT="8766" # 1.5b:8765, 3b:8766
 MEMORY_REMOTE_EXCLUDE_NODES=''
 MEMORY_APPTAINER_SIF="/mnt/petrelfs/wurong/glibc_ubuntu22.sif"
 MEMORY_CONDA_SH="/mnt/petrelfs/wurong/miniconda3/etc/profile.d/conda.sh"
@@ -81,13 +80,13 @@ MEMORY_REMOTE_CONDA_ENV="verl-agent"
 
 MEMORY_REBUILD_SOURCE_PATH=""
 
-EXPERIENCE_UTILITY_ENABLE=True
+EXPERIENCE_UTILITY_ENABLE="True"
 EXPERIENCE_UTILITY_PRUNE_EVERY_N_GLOBAL_STEPS=20
 EXPERIENCE_UTILITY_PRUNE_SCORE_THRESHOLD=0.3
 EXPERIENCE_UTILITY_MIN_USES_BEFORE_PRUNE=3
 
-EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_170-local_test-7b_instruct_adaptor"
-EXPERIMENTS_ROOT="${REPO_DATA_DIR}/MemAdaptor/exp_results"
+EXPERIMENT_NAME="train_adaptor-same-7b-cold_start_20260706_epoch2-step_80-local_test-7b_instruct_adaptor"
+EXPERIMENTS_ROOT="data/MemAdaptor/exp_results"
 
 if [ "${MEMORY_ENABLED}" = "True" ]; then
   EXPERIMENT_NAME="${EXPERIMENT_NAME}-with_${RETRIEVAL_MODE}_memory"
@@ -99,14 +98,14 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 # MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
+MEMORY_STORE_DIR="data/MemAdaptor/exp_results/webshop/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb"
 
-MEMORY_STORE_DIR='data/MemAdaptor/exp_results/alfworld/train_adaptor-same-7B-cold_start_20260706_epoch2-with_agentic_memory-retrieve_memory_text-self_distill/memory_vdb'
 
-TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/alfworld/${EXPERIMENT_NAME}"
+TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
-LOG_FILE="${EXP_DIR}/train_alfworld_adaptor_local_test-$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${EXP_DIR}/train_webshop_adaptor_local_test-$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
@@ -116,20 +115,17 @@ echo "[log] MEM_ADAPTOR_MODEL_PATH=${MEM_ADAPTOR_MODEL_PATH}"
 echo "[log] MEMORY_STORE_DIR=${MEMORY_STORE_DIR}"
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
-train_data_size=16
-val_data_size=140
+# 与 run_webshop.sh 一致的占位规模（可按集群与 GRPO group 调整）
+train_data_size=18
+val_data_size=250 # webshop验证集一共500个样本，所以val_data_size要被500整除，注意不能drop last
 group_size=8
 
-DATA_MAX_PROMPT_LENGTH=2048
+DATA_MAX_PROMPT_LENGTH=6144
 DATA_MAX_RESPONSE_LENGTH=512
-SUMMARIZER_MAX_PROMPT_TOKENS="${SUMMARIZER_MAX_PROMPT_TOKENS:-12288}"
-ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-}"
-if [ -z "${ROLLOUT_MAX_MODEL_LEN}" ]; then
-  ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
-fi
+SUMMARIZER_MAX_PROMPT_TOKENS=12288
+ROLLOUT_MAX_MODEL_LEN=$((SUMMARIZER_MAX_PROMPT_TOKENS + DATA_MAX_RESPONSE_LENGTH))
 
 tensor_model_parallel_size=2
-VALIDATE_ON_TRAIN_SPLIT=False
 
 PREPARE_FLAGS=()
 if [ "${PREPARE_OVERWRITE:-0}" = "1" ] || [ "${PREPARE_OVERWRITE:-}" = "true" ]; then
@@ -139,13 +135,12 @@ fi
 python3 -m examples.data_preprocess.prepare \
   --mode 'text' \
   --local_dir "${DATA_ROOT}" \
-  --infer_alfworld_sizes \
-  --alfworld_eval_split eval_in_distribution \
+  --infer_webshop_sizes \
+  --train_data_size "${train_data_size}" \
+  --val_data_size "${val_data_size}" \
   "${PREPARE_FLAGS[@]+"${PREPARE_FLAGS[@]}"}"
 
 MEMORY_CLI=()
-MEMORY_CLI+=(env.memory.memory_text_retrieval_dedupe_similarity_threshold=null)
-MEMORY_CLI+=(env.memory.memory_text_insert_dedupe_similarity_threshold=null)
 if [ -n "${MEMORY_REBUILD_SOURCE_PATH}" ]; then
   MEMORY_CLI+=(env.memory.rebuild_source_path="${MEMORY_REBUILD_SOURCE_PATH}")
 fi
@@ -157,7 +152,13 @@ if [ -n "${EMBEDDING_API_KEY}" ]; then
 fi
 append_retrieval_instruction_cli
 
-export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2
+export VLLM_NCCL_SO_PATH=/mnt/petrelfs/wurong/miniconda3/envs/verl-agent-webshop/lib/python3.10/site-packages/nvidia/nccl/lib/libnccl.so.2
+if [ -z "${VLLM_NCCL_SO_PATH:-}" ]; then
+  VLLM_NCCL_SO_PATH="$(
+    python3 -c 'import pathlib,sys; lib=pathlib.Path(sys.prefix)/"lib"; xs=sorted(lib.glob("python*/site-packages/nvidia/nccl/lib/libnccl.so.2")); print(xs[0] if xs else "")' 2>/dev/null || true
+  )"
+  export VLLM_NCCL_SO_PATH
+fi
 
 mem_exclude_to_hydra_list() {
   local s="${1:-}" IFS=,
@@ -219,7 +220,6 @@ else
   EXPERIENCE_UTILITY_CLI=(env.memory.experience_utility.enable=False)
 fi
 
-
 unset RAY_ADDRESS
 ray stop --force || true
 ray start --head
@@ -240,25 +240,25 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.trainable=True \
   actor_rollout_ref.actor.optim.lr=1e-6 \
   actor_rollout_ref.model.use_remove_padding=True \
-  actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
   actor_rollout_ref.actor.use_kl_loss=True \
   actor_rollout_ref.actor.kl_loss_coef=0.01 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${tensor_model_parallel_size}" \
   actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
   actor_rollout_ref.rollout.name="${ENGINE}" \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
   actor_rollout_ref.rollout.enable_chunked_prefill=False \
   actor_rollout_ref.rollout.enforce_eager=False \
   actor_rollout_ref.rollout.free_cache_engine=False \
   actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
   actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.actor.use_invalid_action_penalty=True \
   actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
@@ -266,18 +266,19 @@ python3 -m verl.trainer.main_ppo \
   mem_adaptor.enable=True \
   mem_adaptor.use_actor_rollout_wg=false \
   mem_adaptor.train_memory_adaptor=false \
+  mem_adaptor.retrieved_state_mode=random_vdb \
   mem_adaptor.model.path="${MEM_ADAPTOR_MODEL_PATH}" \
   mem_adaptor.resource_pool_gpus_per_node="[${mem_adaptor_gpus_per_node}]" \
-  env.env_name=alfworld/AlfredTWEnv \
-  env.alfworld.validate_on_train_split="${VALIDATE_ON_TRAIN_SPLIT}" \
+  env.env_name=Webshop \
   env.seed=0 \
-  env.max_steps=50 \
+  env.max_steps=15 \
   env.memory.enabled="${MEMORY_ENABLED}" \
   env.memory.store_dir="${MEMORY_STORE_DIR}" \
   env.memory.write_back="${MEMORY_WRITE_BACK}" \
   env.memory.experience_summarizer.mode="${EXPERIENCE_SUMMARIZER_MODE}" \
   env.memory.experience_summarizer.schema="${EXPERIENCE_SUMMARIZER_SCHEMA}" \
   env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
+  env.memory.experience_summarizer.summarizer_trajectory_min_turns_kept=4 \
   env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
   env.memory.retrieve_key="${RETRIEVE_KEY}" \
   "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
@@ -288,7 +289,7 @@ python3 -m verl.trainer.main_ppo \
   env.resources_per_worker.num_cpus="${num_cpus_per_env_worker}" \
   trainer.critic_warmup=0 \
   trainer.logger=['console','wandb'] \
-  trainer.project_name='MemAdaptor_alfworld' \
+  trainer.project_name='MemAdaptor_webshop' \
   trainer.experiment_name="${EXPERIMENT_NAME}" \
   trainer.default_local_dir="${TRAINER_CHECKPOINT_DIR}" \
   trainer.n_gpus_per_node="${trainer_n_gpus_per_node}" \
