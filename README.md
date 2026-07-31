@@ -4,10 +4,10 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2607.28272-b31b1b.svg)](https://arxiv.org/abs/2607.28272)
 [![Hugging Face Paper](https://img.shields.io/badge/🤗%20Paper-2607.28272-yellow)](https://huggingface.co/papers/2607.28272)
-[![Hugging Face Models](https://img.shields.io/badge/🤗%20Models-MemHarness-yellow)](https://huggingface.co/KnowledgeXLab/MemHarness-ALFWorld-7B)
+[![Hugging Face Models](https://img.shields.io/badge/🤗%20Models-MemHarness-yellow)](https://huggingface.co/KnowledgeXLab/MemHarness)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**[Paper](https://arxiv.org/abs/2607.28272)** · **[🤗 Paper](https://huggingface.co/papers/2607.28272)** · **[🤗 Models](https://huggingface.co/KnowledgeXLab/MemHarness-ALFWorld-7B)** · **[Model Zoo](#-model-zoo)**
+**[<img src="https://img.shields.io/badge/-arXiv-B31B1B?logo=arxiv&logoColor=white" height="16" valign="middle"> arXiv](https://arxiv.org/abs/2607.28272)** · **[<img src="https://www.alphaxiv.org/favicon.ico" width="16" height="16" valign="middle"> alphaXiv](https://www.alphaxiv.org/abs/2607.28272)** · **[🤗 Paper](https://huggingface.co/papers/2607.28272)** · **[🤗 Models](https://huggingface.co/KnowledgeXLab/MemHarness)** · **[Model Zoo](#-model-zoo)**
 
 </div>
 
@@ -29,6 +29,7 @@ Inspired by the reconstructive nature of human memory, MemHarness decomposes mem
 
 ## 📰 Updates
 
+- **`2026-07-31`**: 🤗 Model weights (cold-start & GRPO-trained) are available on [Hugging Face](https://huggingface.co/KnowledgeXLab/MemHarness).
 - **`2026-07-30`**: 📄 Paper is publicly available on [arXiv](https://arxiv.org/abs/2607.28272).
 - **`2026-07-30`**: 🎉 Codebase is publicly available.
 
@@ -230,23 +231,25 @@ MemHarness/
 
 ## 🤗 Model Zoo
 
-For those with limited resources or who wish to bypass the training process, we provide direct access to our open-sourced model weights on the Hugging Face Hub.
+All model weights are hosted on the Hugging Face Hub at **[KnowledgeXLab/MemHarness](https://huggingface.co/KnowledgeXLab/MemHarness)**.
 
 ### Cold-Start Models (SFT)
 
 These checkpoints align the base model with the MemHarness interaction format (reasoning, memory retrieval, and reconstruction) before GRPO training.
 
-| Model | Base Architecture | Params | Hugging Face Link |
+| Checkpoint | Base Architecture | Params | Hugging Face |
 | --- | --- | --- | --- |
-| MemHarness-ColdStart-ALFWorld-7B | Qwen2.5-7B-Instruct | 7B | [Link](https://huggingface.co/KnowledgeXLab/MemHarness-ColdStart-ALFWorld-7B) *(coming soon)* |
-| MemHarness-ColdStart-WebShop-7B | Qwen2.5-7B-Instruct | 7B | [Link](https://huggingface.co/KnowledgeXLab/MemHarness-ColdStart-WebShop-7B) *(coming soon)* |
+| Cold-Start (ALFWorld-7B) | Qwen2.5-7B-Instruct | 7B | [MemHarness](https://huggingface.co/KnowledgeXLab/MemHarness) |
+| Cold-Start (WebShop-7B) | Qwen2.5-7B-Instruct | 7B | [MemHarness](https://huggingface.co/KnowledgeXLab/MemHarness) |
 
 ### GRPO-Trained Models
 
-| Model | Base Architecture | Params | Hugging Face Link |
+| Checkpoint | Base Architecture | Params | Hugging Face |
 | --- | --- | --- | --- |
-| MemHarness-ALFWorld-7B | Qwen2.5-7B-Instruct | 7B | [Link](https://huggingface.co/KnowledgeXLab/MemHarness-ALFWorld-7B) *(coming soon)* |
-| MemHarness-WebShop-7B | Qwen2.5-7B-Instruct | 7B | [Link](https://huggingface.co/KnowledgeXLab/MemHarness-WebShop-7B) *(coming soon)* |
+| MemHarness (ALFWorld-7B) | Qwen2.5-7B-Instruct | 7B | [MemHarness](https://huggingface.co/KnowledgeXLab/MemHarness) |
+| MemHarness (WebShop-7B) | Qwen2.5-7B-Instruct | 7B | [MemHarness](https://huggingface.co/KnowledgeXLab/MemHarness) |
+
+Download the desired checkpoint from the [Files](https://huggingface.co/KnowledgeXLab/MemHarness/tree/main) tab and set `MODEL_PATH` in the training scripts accordingly.
 
 ## 🔗 Related Projects
 
