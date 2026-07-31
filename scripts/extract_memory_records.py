@@ -78,9 +78,10 @@ Trajectory:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract memory records from successful AgentGym trajectories with an OpenAI-compatible LLM.")
-    parser.add_argument("--input_dir", default="data/AgentGym/AgentTraj-L", help="Directory containing the source trajectory json files.")
+    parser.add_argument("--input_dir", default="./data", help="Directory containing the source trajectory json files.")
     parser.add_argument("--benchmarks", default=["alfworld", "webshop"], help="[alfworld, webshop, sciworld]")
-    parser.add_argument("--base_url", default="http://35.220.164.252:3888/v1/", help="OpenAI-compatible base URL")
+    parser.add_argument("--base_url", required=True, help="OpenAI-compatible base URL")
+    parser.add_argument("--api_key", required=True, help="OpenAI API key")
     parser.add_argument("--model", default="gpt-5.1", help="LLM model name for extraction.")
     parser.add_argument("--start_index", type=int, default=0, help="Start trajectory index.")
     parser.add_argument("--max_trajectories", type=int, default=-1, help="How many trajectories to process per benchmark.")
@@ -216,7 +217,6 @@ def build_record(
             value = float(value)
         except (TypeError, ValueError):
             value = None
-    # 转化成人类可读的时间戳
     now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     source_episode_id = str(dataset_item_id) if dataset_item_id is not None else f"{task_name}_{trajectory_index}"
 
@@ -269,7 +269,7 @@ def process_benchmark(bench: str, args: argparse.Namespace) -> None:
     selected = trajectories[args.start_index:end_index]
 
     def process_trajectory(offset: int, trajectory: dict[str, Any]) -> list[dict[str, Any]]:
-        client = build_client(base_url=args.base_url, api_key= "sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH", timeout=args.timeout)
+        client = build_client(base_url=args.base_url, api_key= args.api_key, timeout=args.timeout)
         trajectory_index = args.start_index + offset
         dataset_item_id = trajectory.get("item_id", trajectory_index)
         trajectory_text = trajectory_to_text(trajectory)

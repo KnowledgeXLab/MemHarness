@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-"""
-Build cold-start SFT data for **experience summarization** (JSON memory extraction).
-
-Trajectory text is built from **agent cold-start** parquet rows (``build_alfworld_coldstart_data.py`` /
-``build_webshop_coldstart_data.py``): each step uses the MemAdaptor chat ``messages`` (env user prompts,
-``<memory>`` injection, assistant outputs with ``<think>`` / ``<action>`` / ``<memory_retrieve>``).
-
-Prompts match ``agent_system/memory/experience_summarizer.py``. Gold JSON labels come from teacher
-``*_memory_records-*.jsonl``, joined on ``item_id`` (default group key ``metadata.dataset_item_id``).
-
-By default, writes **merged** train/val: agent rows + summarizer rows (same split as input parquets).
-
-Examples::
-
-  python3 scripts/build_summarizer_coldstart_data.py --task alfworld \\
-    --output-dir data/MemAdaptor/cold_start/alfworld/mixed_agent_summarizer_20260706
-
-  python3 scripts/build_summarizer_coldstart_data.py --task webshop --schema compact \\
-    --output-dir data/MemAdaptor/cold_start/webshop/mixed_agent_summarizer_20260706 \\
-    --write-jsonl
-
-  # Cap agent + summarizer rows per split (0 = no cap):
-  python3 scripts/build_summarizer_coldstart_data.py --task alfworld \\
-    --max-agent-rows 200 --max-summarizer-rows 200 \\
-    --max-agent-rows-val 20 --max-summarizer-rows-val 20 \\
-    --output-dir data/MemAdaptor/cold_start/alfworld/mixed_sample200_20260519
-"""
 
 from __future__ import annotations
 
@@ -49,15 +22,15 @@ from agent_system.memory.experience_summarizer import (
 TASK_DEFAULTS: Dict[str, Dict[str, str]] = {
     "alfworld": {
         "task_name": "alfworld",
-        "memory_jsonl": "data/MemAdaptor/AgentTraj-L/alfworld_train_memory_records-gpt-5.1.jsonl",
-        "agent_train_parquet": "data/MemAdaptor/cold_start/alfworld/20260429_sample1000_seed42_train.parquet",
-        "agent_val_parquet": "data/MemAdaptor/cold_start/alfworld/20260429_sample100_seed42_val.parquet",
+        "memory_jsonl": "./data/cold_start/alfworld_train_memory_records-gpt-5.1.jsonl",
+        "agent_train_parquet": "./data/cold_start/alfworld/sample200_seed42_train.parquet",
+        "agent_val_parquet": "./data/cold_start/alfworld/sample20_seed42_val.parquet",
     },
     "webshop": {
         "task_name": "webshop",
-        "memory_jsonl": "data/MemAdaptor/AgentTraj-L/webshop_train_memory_records-gpt-5.1.jsonl",
-        "agent_train_parquet": "data/MemAdaptor/cold_start/webshop/20260511_sample1000_seed42_train.parquet",
-        "agent_val_parquet": "data/MemAdaptor/cold_start/webshop/20260511_sample100_seed42_val.parquet",
+        "memory_jsonl": "./data/cold_start/webshop_train_memory_records-gpt-5.1.jsonl",
+        "agent_train_parquet": "./data/cold_start/webshop/sample200_seed42_train.parquet",
+        "agent_val_parquet": "./data/cold_start/webshop/sample20_seed42_val.parquet",
     },
 }
 
@@ -405,11 +378,6 @@ def merge_agent_and_summarizer(
     *,
     seed: int,
 ) -> pd.DataFrame:
-    """
-    合并 agent 数据和 summarizer 数据，并进行整体 shuffle，会打乱 data_kind（比如 agent/summarizer）顺序。
-
-    注意：经过 sample(frac=1.0) 打乱后，不同 data_kind 类型的数据会混排。
-    """
     agent_df = ensure_agent_data_kind(agent_df)
     if summ_df.empty:
         return agent_df.reset_index(drop=True)

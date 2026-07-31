@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-"""
-Build cold-start SFT parquet / JSONL for AlfWorld -> MemAdaptor XML protocol.
-
-Reads:
-  - alfworld_train.json (ShareGPT): ``conversations`` + ``item_id`` (AgentTraj-L format).
-  - optional memory records JSONL (teacher memories).
-
-Human turns are rewritten to match ``agent_system/environments/prompts/alfworld.py`` templates and
-``env_manager.build_text_obs`` history formatting unless ``--raw-sharegpt-user-text`` is set.
-Assistant turns use ``<think>`` / ``<action>``; optional ``<memory_retrieve>`` is appended on the
-same assistant message as think+action (format_reward convention).
-
-Writes:
-  - ``train.parquet`` / ``val.parquet`` (or ``--output``), column ``messages``.
-  - With ``--write-jsonl``: ``train.jsonl`` / ``val.jsonl`` (or sibling ``.jsonl``).
-
-Malformed episodes (e.g. GPT turns without a usable Action, bad ShareGPT structure) are skipped
-with a stderr log line; memory JSONL validation remains strict at load time.
-"""
 
 from __future__ import annotations
 
@@ -325,7 +306,6 @@ def heuristic_retrieve_query(*, task_hint: str, state_text: str, memory_text: st
 
 
 def _is_agenttraj_instruction_banner(text: str) -> bool:
-    """Drop AgentTraj-L opening essay (MemAdaptor uses alfworld templates instead)."""
     return bool(text) and text.lstrip().startswith("Interact with a household")
 
 
@@ -513,8 +493,8 @@ def build_messages_for_episode(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--train-json", default="data/MemAdaptor/AgentTraj-L/alfworld_train.json", help="Path to alfworld_train.json (list of episodes).")
-    p.add_argument("--memory-jsonl", default="data/MemAdaptor/AgentTraj-L/alfworld_train_memory_records-gpt-5.1.jsonl", help="Optional memory records JSONL (gpt teacher).")
+    p.add_argument("--train-json", default="./data/alfworld_train.json", help="Path to alfworld_train.json (list of episodes).")
+    p.add_argument("--memory-jsonl", default="./data/alfworld_train_memory_records-gpt-5.1.jsonl", help="Optional memory records JSONL (gpt teacher).")
     p.add_argument(
         "--memory-group-key",
         default="dataset_item_id",
@@ -533,7 +513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--val-fraction", type=float, default=0.02)
     p.add_argument("--max-episodes", type=int, default=0, help="0 = all episodes (debug).")
     p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
-    p.add_argument("--output", default="data/MemAdaptor/cold_start/20260429.parquet", help="Single combined parquet path (if set, ignores val split).")
+    p.add_argument("--output", default="./data/MemAdaptor_cold_start.parquet", help="Single combined parquet path (if set, ignores val split).")
     p.add_argument(
         "--write-jsonl",
         default=True,
@@ -582,12 +562,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p.add_argument(
         "--retrieve-api-url",
-        default="http://35.220.164.252:3888/v1/",
+        required=True,
         help="OpenAI-compatible API base URL (same as extract_memory_records --base_url), e.g. http://host:port/v1/",
     )
     p.add_argument(
         "--retrieve-api-key",
-        default="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH",
+        required=True,
         help="Bearer token for the OpenAI-compatible API (optional if gateway allows empty key).",
     )
     p.add_argument("--retrieve-model", default="gpt-5.1", help="Model name passed to chat.completions.")

@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""
-Build cold-start SFT parquet / JSONL for WebShop -> MemAdaptor XML protocol.
 
-Reads:
-  - webshop_train.json (ShareGPT): ``conversations`` + ``item_id`` (AgentTraj-L format).
-  - optional memory records JSONL (teacher memories).
-
-User turns are rewritten to match ``agent_system/environments/prompts/webshop.py`` and
-``WebshopEnvironmentManager.build_text_obs`` (formatted observation + admissible actions),
-unless ``--raw-sharegpt-user-text`` is set.
-
-Assistant turns use ``<think>`` / ``<action>``. When a memory step is sampled, the
-sequence matches agentic rollout: (1) assistant with think + ``<memory_retrieve>`` only (no action),
-(2) user ``<memory>...</memory>``, (3) assistant with think + ``<action>`` for the same env state.
-
-Malformed episodes are skipped with a stderr log line; memory JSONL validation is strict
-at load time (same fields as ``build_alfworld_coldstart_data.py``).
-"""
 
 from __future__ import annotations
 
@@ -239,13 +222,6 @@ def _is_sharegpt_instruction_banner(text: str) -> bool:
 
 
 def _instruction_block_and_tail(raw_human: str) -> Tuple[str, List[str]]:
-    """
-    AgentTraj-L uses either:
-      ``WebShop [SEP] Instruction: [SEP] <task> [SEP] ...``
-    or:
-      ``Instruction: [SEP] <task> [SEP] ...``
-    Match ``WebshopEnvironmentManager.extract_task`` / ``format_obs`` semantics.
-    """
     parts = raw_human.split(" [SEP] ")
     for i, p in enumerate(parts):
         if p.strip() != "Instruction:":
@@ -271,13 +247,6 @@ def format_webshop_observation(raw_human: str) -> str:
 
 
 def infer_webshop_admissible_strings(raw_human: str) -> List[str]:
-    """
-    Approximate ``WebshopEnvironmentManager.format_avail_actions`` from text observations.
-
-    Initial landing page in AgentTraj-L ends with a single ``Search`` segment → only
-    ``search[<your query>]``. Otherwise we treat every segment after the instruction as a
-    clickable target (``webshop_projection`` lowercases actions at runtime).
-    """
     _, tail_raw = _instruction_block_and_tail(raw_human)
     tail = [p.strip() for p in tail_raw]
     if not tail:
@@ -547,12 +516,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--train-json",
-        default="data/MemAdaptor/AgentTraj-L/webshop_train.json",
+        default="./data/MemAdaptor/cold_start/webshop/webshop_train.json",
         help="Path to webshop_train.json (list of episodes).",
     )
     p.add_argument(
         "--memory-jsonl",
-        default="data/MemAdaptor/AgentTraj-L/webshop_train_memory_records-gpt-5.1.jsonl",
+        default="./data/MemAdaptor/cold_start/webshop/webshop_train_memory_records-gpt-5.1.jsonl",
         help="Optional memory records JSONL (gpt teacher).",
     )
     p.add_argument(
@@ -567,7 +536,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
     p.add_argument(
         "--output",
-        default="data/MemAdaptor/cold_start/webshop/webshop_coldstart.parquet",
+        default="./data/MemAdaptor/cold_start/webshop/webshop_coldstart.parquet",
         help="Single combined parquet path (if set, ignores val split). Use \"\" with --output-dir for train/val split.",
     )
     p.add_argument("--write-jsonl", default=True, help="Also write JSONL next to parquet.")
@@ -627,12 +596,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     p.add_argument(
         "--retrieve-api-url",
-        default="http://35.220.164.252:3888/v1/",
+        required=True,
         help="OpenAI-compatible API base URL (same as extract_memory_records --base_url), e.g. http://host:port/v1/",
     )
     p.add_argument(
         "--retrieve-api-key",
-        default="sk-5QyBNRgeFFiX6sY1aooYjvtygjNelFW87I6ziXkE6mP6tVeH",
+        required=True,         
         help="Bearer token for the OpenAI-compatible API (optional if gateway allows empty key).",
     )
     p.add_argument("--retrieve-model", default="gpt-5.1", help="Model name passed to chat.completions.")
