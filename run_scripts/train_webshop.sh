@@ -9,16 +9,16 @@ unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 
 
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/webshop/qwen2.5-7b-cold-start-20260706/global_step_400'
-
-MEM_ADAPTOR_USE_RECOMMENDED_PHASES="0"
+# Policy initialization: a cold-start SFT checkpoint (see scripts/cold_start_sft.sh),
+# or the base model directly (e.g. Qwen/Qwen2.5-7B-Instruct).
+MODEL_PATH="${MODEL_PATH:-models/save_models/memharness/cold_start/webshop/qwen2.5-7b-cold-start/global_step_400}"
 
 trainer_n_gpus_per_node=8
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
-export MEMADAPTOR_REPO_ROOT="${MEMADAPTOR_REPO_ROOT:-${REPO_ROOT}}"
+export MEMHARNESS_REPO_ROOT="${MEMHARNESS_REPO_ROOT:-${REPO_ROOT}}"
 
 if [[ ! -f "${SCRIPT_DIR}/memory_eval_helpers.sh" ]]; then
   echo "[error] memory_eval_helpers.sh not found: ${SCRIPT_DIR}/memory_eval_helpers.sh" >&2
@@ -43,21 +43,25 @@ EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic"
 RETRIEVE_KEY="memory_text"
 
-EMBEDDING_API_URL=""
-EMBEDDING_API_KEY=""
+# OpenAI-compatible embedding API used by the memory bank
+# (e.g. serve BGE-M3 locally: `vllm serve BAAI/bge-m3 --port 8001`).
+EMBEDDING_API_URL="${EMBEDDING_API_URL:-http://localhost:8001/v1}"
+EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-EMPTY}"
 
 
 USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
 RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
 RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
-MEMORY_REMOTE_SLURM="True"
-MEMORY_REMOTE_PARTITION=""  
-MEMORY_REMOTE_SERVER_PORT="8765"
-MEMORY_REMOTE_EXCLUDE_NODES=''
-MEMORY_APPTAINER_SIF="/user/glibc_ubuntu22.sif"
-MEMORY_CONDA_SH="/user/miniconda3/etc/profile.d/conda.sh"
-MEMORY_REMOTE_CONDA_ENV="verl-agent"
+# Optional: launch the memory VDB server on a Slurm cluster (default: run locally).
+MEMORY_REMOTE_SLURM="${MEMORY_REMOTE_SLURM:-False}"
+MEMORY_REMOTE_PARTITION="${MEMORY_REMOTE_PARTITION:-}"   # Slurm partition, e.g. "gpu"
+MEMORY_REMOTE_SERVER_PORT="${MEMORY_REMOTE_SERVER_PORT:-8765}"
+MEMORY_REMOTE_EXCLUDE_NODES="${MEMORY_REMOTE_EXCLUDE_NODES:-}"
+# Only required when MEMORY_REMOTE_SLURM=True:
+MEMORY_APPTAINER_SIF="${MEMORY_APPTAINER_SIF:-}"         # e.g. /path/to/glibc_ubuntu22.sif
+MEMORY_CONDA_SH="${MEMORY_CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
+MEMORY_REMOTE_CONDA_ENV="${MEMORY_REMOTE_CONDA_ENV:-memharness}"
 
 MEMORY_REBUILD_SOURCE_PATH=""
 
@@ -79,7 +83,7 @@ fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
-TRAINER_CHECKPOINT_DIR="./models/save_models/mem_adaptor/${TASK_NAME}/${EXPERIMENT_NAME}"
+TRAINER_CHECKPOINT_DIR="./models/save_models/memharness/${TASK_NAME}/${EXPERIMENT_NAME}"
 
 mkdir -p "${EXP_DIR}"
 mkdir -p "${TRAINER_CHECKPOINT_DIR}"
@@ -194,8 +198,12 @@ else
 fi
 
 
-ray job submit --runtime-env-json "${RAY_JOB_RUNTIME_ENV_JSON}" -- \
-  python3 -m verl.trainer.main_ppo \
+unset RAY_ADDRESS
+ray stop --force || true
+ray start --head
+sleep 5
+
+python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \

@@ -3,34 +3,31 @@
 set -euo pipefail
 
 
-if [[ -n "${MEMADAPTOR_ROOT:-}" ]]; then
-  REPO_ROOT="${MEMADAPTOR_ROOT}"
+if [[ -n "${MEMHARNESS_ROOT:-}" ]]; then
+  REPO_ROOT="${MEMHARNESS_ROOT}"
 elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
 else
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 cd "${REPO_ROOT}"
-if [[ ! -f "${REPO_ROOT}/scripts/slurm_cold_start_sft.sh" ]]; then
-  echo "ERROR: REPO_ROOT=${REPO_ROOT} does not look like MemAdaptor (missing scripts/slurm_cold_start_sft.sh)." >&2
-  echo "Fix: cd /path/to/MemAdaptor && sbatch scripts/slurm_cold_start_sft.sh   OR   export MEMADAPTOR_ROOT=/path/to/MemAdaptor" >&2
-  exit 1
-fi
 mkdir -p "${REPO_ROOT}/logs/cold_start"
 
 export HYDRA_FULL_ERROR="1"
 
-export TASK="webshop"
+# Benchmark to build the cold-start model for: alfworld | webshop
+export TASK="${TASK:-webshop}"
 
 export EXP_NAME="${TASK}-qwen2.5-7b-cold-start"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-TRAIN_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_sample200/train.parquet"
-VAL_FILES="data/MemAdaptor/cold_start/${TASK}/mixed_sample200/val.parquet"
-MODEL_ID="./models/Qwen2.5-7B-Instruct"
+TRAIN_FILES="data/MemHarness/cold_start/${TASK}/mixed_sample200/train.parquet"
+VAL_FILES="data/MemHarness/cold_start/${TASK}/mixed_sample200/val.parquet"
+# Base model: Hugging Face model id or a local path.
+MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}"
 
-SAVE_ROOT="./models/save_models/mem_adaptor/cold_start/${TASK}/${EXP_NAME}"
+SAVE_ROOT="./models/save_models/memharness/cold_start/${TASK}/${EXP_NAME}"
 mkdir -p "${SAVE_ROOT}"
 
 
@@ -67,7 +64,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NPROC}" \
   optim.warmup_steps_ratio=0.1 \
   optim.lr_scheduler='cosine' \
   trainer.default_local_dir="${SAVE_ROOT}" \
-  trainer.project_name=memadaptor-cold-start-${TASK} \
+  trainer.project_name=memharness-cold-start-${TASK} \
   trainer.experiment_name="${EXP_NAME}" \
   trainer.logger=['wandb','console'] \
   trainer.total_epochs=2 \

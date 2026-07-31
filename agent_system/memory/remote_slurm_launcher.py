@@ -77,7 +77,7 @@ def start_memory_vdb_on_slurm_node(
     if not conda_env:
         conda_env = os.environ.get("CONDA_DEFAULT_ENV", "verl-agent")
 
-    repo_root = str(rl.get("repo_root") or "").strip() or os.environ.get("MEMADAPTOR_REPO_ROOT") or REPO_ROOT
+    repo_root = str(rl.get("repo_root") or "").strip() or os.environ.get("MEMHARNESS_REPO_ROOT") or REPO_ROOT
 
     sbatch_extra = rl.get("sbatch_extra_lines") or []
     if not isinstance(sbatch_extra, list):

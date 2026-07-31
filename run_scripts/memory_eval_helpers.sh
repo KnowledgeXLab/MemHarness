@@ -23,7 +23,7 @@ setup_verl_agent_text_data_paths() {
   if [[ -z "${REPO_DATA_DIR:-}" ]]; then
     REPO_DATA_DIR="$(resolve_repo_data_dir)" || return 1
   fi
-  DATA_ROOT="${REPO_DATA_DIR}/MemAdaptor/verl-agent/${bench}"
+  DATA_ROOT="${REPO_DATA_DIR}/MemHarness/verl-agent/${bench}"
   TRAIN_FILE="${DATA_ROOT}/text/train.parquet"
   TEST_FILE="${DATA_ROOT}/text/test.parquet"
   VAL_FILE="${TEST_FILE}"

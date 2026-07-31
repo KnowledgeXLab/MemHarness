@@ -513,7 +513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--val-fraction", type=float, default=0.02)
     p.add_argument("--max-episodes", type=int, default=0, help="0 = all episodes (debug).")
     p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
-    p.add_argument("--output", default="./data/MemAdaptor_cold_start.parquet", help="Single combined parquet path (if set, ignores val split).")
+    p.add_argument("--output", default="./data/MemHarness/cold_start/alfworld/alfworld_coldstart.parquet", help="Single combined parquet path (if set, ignores val split).")
     p.add_argument(
         "--write-jsonl",
         default=True,

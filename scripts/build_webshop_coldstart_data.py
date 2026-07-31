@@ -516,12 +516,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--train-json",
-        default="./data/MemAdaptor/cold_start/webshop/webshop_train.json",
+        default="./data/MemHarness/cold_start/webshop/webshop_train.json",
         help="Path to webshop_train.json (list of episodes).",
     )
     p.add_argument(
         "--memory-jsonl",
-        default="./data/MemAdaptor/cold_start/webshop/webshop_train_memory_records-gpt-5.1.jsonl",
+        default="./data/MemHarness/cold_start/webshop/webshop_train_memory_records-gpt-5.1.jsonl",
         help="Optional memory records JSONL (gpt teacher).",
     )
     p.add_argument(
@@ -536,7 +536,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
     p.add_argument(
         "--output",
-        default="./data/MemAdaptor/cold_start/webshop/webshop_coldstart.parquet",
+        default="./data/MemHarness/cold_start/webshop/webshop_coldstart.parquet",
         help="Single combined parquet path (if set, ignores val split). Use \"\" with --output-dir for train/val split.",
     )
     p.add_argument("--write-jsonl", default=True, help="Also write JSONL next to parquet.")

@@ -26,3 +26,5 @@ packaging>=20.0
 uvicorn
 fastapi
 qwen-vl-utils[decord]
+# Milvus Lite: local vector database for the experiential memory bank
+pymilvus

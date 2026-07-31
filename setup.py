@@ -47,6 +47,8 @@ install_requires = [
     "wandb",
     "packaging>=20.0",
     "qwen-vl-utils[decord]",
+    # Milvus Lite: local vector database for the experiential memory bank
+    "pymilvus",
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy"]

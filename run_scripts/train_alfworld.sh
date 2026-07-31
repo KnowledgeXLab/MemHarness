@@ -3,17 +3,21 @@
 set -x
 set -euo pipefail
 
-mkdir -p logs/mem_adaptor/alfworld
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+export MEMHARNESS_REPO_ROOT="${MEMHARNESS_REPO_ROOT:-${REPO_ROOT}}"
 
+mkdir -p logs/memharness/alfworld
 
 ENGINE="vllm"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES 2>/dev/null || true
 export HYDRA_FULL_ERROR=1
 
-
-MODEL_PATH='models/save_models/mem_adaptor/cold_start/alfworld/qwen2.5-7b-cold-start-20260706/global_step_400'
-
+# Policy initialization: a cold-start SFT checkpoint (see scripts/cold_start_sft.sh),
+# or the base model directly (e.g. Qwen/Qwen2.5-7B-Instruct).
+MODEL_PATH="${MODEL_PATH:-models/save_models/memharness/cold_start/alfworld/qwen2.5-7b-cold-start/global_step_400}"
 
 trainer_n_gpus_per_node=8
 GPU_NUM="${trainer_n_gpus_per_node}"
@@ -42,21 +46,24 @@ EXPERIENCE_SUMMARIZER_SCHEMA="compact"
 RETRIEVAL_MODE="agentic" # agentic | fixed
 RETRIEVE_KEY="memory_text"
 
-EMBEDDING_API_URL=""
-EMBEDDING_API_KEY="3"
+# OpenAI-compatible embedding API used by the memory bank
+# (e.g. serve BGE-M3 locally: `vllm serve BAAI/bge-m3 --port 8001`).
+EMBEDDING_API_URL="${EMBEDDING_API_URL:-http://localhost:8001/v1}"
+EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-EMPTY}"
 
 USE_GENERAL_MODEL_RETRIEVAL_HINT="${USE_GENERAL_MODEL_RETRIEVAL_HINT:-1}"
 RETRIEVAL_INSTRUCTION_PROMPT="${RETRIEVAL_INSTRUCTION_PROMPT:-}"
 RETRIEVAL_INSTRUCTION_PROMPT_FILE="${RETRIEVAL_INSTRUCTION_PROMPT_FILE:-}"
 
-MEMORY_REMOTE_SLURM=True
-MEMORY_REMOTE_PARTITION="xx" 
-MEMORY_REMOTE_SERVER_PORT="8765"
-
-MEMORY_REMOTE_EXCLUDE_NODES=''
-MEMORY_APPTAINER_SIF="/user/glibc_ubuntu22.sif"
-MEMORY_CONDA_SH="/user/miniconda3/etc/profile.d/conda.sh"
-MEMORY_REMOTE_CONDA_ENV="verl-agent"
+# Optional: launch the memory VDB server on a Slurm cluster (default: run locally).
+MEMORY_REMOTE_SLURM="${MEMORY_REMOTE_SLURM:-False}"
+MEMORY_REMOTE_PARTITION="${MEMORY_REMOTE_PARTITION:-}"   # Slurm partition, e.g. "gpu"
+MEMORY_REMOTE_SERVER_PORT="${MEMORY_REMOTE_SERVER_PORT:-8765}"
+MEMORY_REMOTE_EXCLUDE_NODES="${MEMORY_REMOTE_EXCLUDE_NODES:-}"
+# Only required when MEMORY_REMOTE_SLURM=True:
+MEMORY_APPTAINER_SIF="${MEMORY_APPTAINER_SIF:-}"         # e.g. /path/to/glibc_ubuntu22.sif
+MEMORY_CONDA_SH="${MEMORY_CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
+MEMORY_REMOTE_CONDA_ENV="${MEMORY_REMOTE_CONDA_ENV:-memharness}"
 
 MEMORY_REBUILD_SOURCE_PATH=""
 
@@ -78,7 +85,7 @@ else
 fi
 
 EXP_DIR="${EXPERIMENTS_ROOT}/${TASK_NAME}/${EXPERIMENT_NAME}"
-TRAINER_CHECKPOINT_DIR="models/save_models/mem_adaptor/alfworld/${EXPERIMENT_NAME}"
+TRAINER_CHECKPOINT_DIR="models/save_models/memharness/alfworld/${EXPERIMENT_NAME}"
 
 MEMORY_STORE_DIR="${EXP_DIR}/memory_vdb"
 
@@ -91,7 +98,7 @@ exec > >(tee "${LOG_FILE}") 2>&1
 echo "[log] Writing full run output to: ${LOG_FILE}"
 echo "[log] REPO_DATA_DIR=${REPO_DATA_DIR}"
 echo "[log] DATA_ROOT=${DATA_ROOT}"
-echo "[log] MODEL_PATH (Reasoning + MemAdaptor)=${MODEL_PATH}"
+echo "[log] MODEL_PATH=${MODEL_PATH}"
 echo "[log] trainer.default_local_dir=${TRAINER_CHECKPOINT_DIR}"
 
 train_data_size=16
@@ -261,7 +268,6 @@ python3 -m verl.trainer.main_ppo \
       env.memory.experience_summarizer.summarizer_max_prompt_tokens="${SUMMARIZER_MAX_PROMPT_TOKENS}" \
       env.memory.retrieval_mode="${RETRIEVAL_MODE}" \
       env.memory.retrieve_key="${RETRIEVE_KEY}" \
-      "${MEM_ADAPTOR_PHASES_CLI[@]+"${MEM_ADAPTOR_PHASES_CLI[@]}"}" \
       "${EXPERIENCE_UTILITY_CLI[@]+"${EXPERIENCE_UTILITY_CLI[@]}"}" \
       "${MEMORY_CLI[@]+"${MEMORY_CLI[@]}"}" \
       "${REMOTE_VDB_CLI[@]+"${REMOTE_VDB_CLI[@]}"}" \
