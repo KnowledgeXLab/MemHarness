@@ -5,7 +5,6 @@ resolve_repo_data_dir() {
     resolved="$(readlink -f "${link}" 2>/dev/null || true)"
     if [[ -z "${resolved}" || ! -d "${resolved}" ]]; then
       echo "[error] Broken/unavailable data symlink: ${link} -> $(readlink "${link}" 2>/dev/null)" >&2
-      echo "[error] Ensure /mnt/phwfile is mounted on compute nodes (workspace/data -> phwfile)." >&2
       return 1
     fi
     printf '%s' "${resolved}"
