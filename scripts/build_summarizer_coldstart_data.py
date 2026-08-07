@@ -22,15 +22,17 @@ from agent_system.memory.experience_summarizer import (
 TASK_DEFAULTS: Dict[str, Dict[str, str]] = {
     "alfworld": {
         "task_name": "alfworld",
-        "memory_jsonl": "./data/cold_start/alfworld_train_memory_records-gpt-5.1.jsonl",
-        "agent_train_parquet": "./data/cold_start/alfworld/sample200_seed42_train.parquet",
-        "agent_val_parquet": "./data/cold_start/alfworld/sample20_seed42_val.parquet",
+        "memory_jsonl": "./data/MemHarness/cold_start/alfworld/memory_records-gpt-5.1.jsonl",
+        "agent_train_parquet": "./data/MemHarness/cold_start/alfworld/train.parquet",
+        "agent_val_parquet": "./data/MemHarness/cold_start/alfworld/val.parquet",
+        "output_dir": "./data/MemHarness/cold_start/alfworld",
     },
     "webshop": {
         "task_name": "webshop",
-        "memory_jsonl": "./data/cold_start/webshop_train_memory_records-gpt-5.1.jsonl",
-        "agent_train_parquet": "./data/cold_start/webshop/sample200_seed42_train.parquet",
-        "agent_val_parquet": "./data/cold_start/webshop/sample20_seed42_val.parquet",
+        "memory_jsonl": "./data/MemHarness/cold_start/webshop/memory_records-gpt-5.1.jsonl",
+        "agent_train_parquet": "./data/MemHarness/cold_start/webshop/train.parquet",
+        "agent_val_parquet": "./data/MemHarness/cold_start/webshop/val.parquet",
+        "output_dir": "./data/MemHarness/cold_start/webshop",
     },
 }
 
@@ -530,7 +532,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Max memories in prompt and gold JSON.",
     )
     p.add_argument("--seed", type=int, default=42, help="Shuffle seed when merging agent + summarizer.")
-    p.add_argument("--output-dir", required=True, help="Write train.parquet / val.parquet here.")
+    p.add_argument("--output-dir", default="", help="Write train.parquet / val.parquet here (default: task preset).")
     p.add_argument("--write-jsonl", action="store_true", help="Also write train.jsonl / val.jsonl.")
     p.add_argument(
         "--no-merge-agent",
@@ -587,6 +589,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     agent_train = args.agent_train_parquet.strip() or defaults["agent_train_parquet"]
     agent_val = args.agent_val_parquet.strip() or defaults["agent_val_parquet"]
     memory_jsonl = args.memory_jsonl.strip() or defaults["memory_jsonl"]
+    output_dir = args.output_dir.strip() or defaults["output_dir"]
     task_name = defaults["task_name"]
     merge_agent = not args.no_merge_agent
 
@@ -625,7 +628,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if train_df.empty and val_df.empty:
         raise SystemExit("No output rows; check agent parquets and memory-jsonl alignment.")
 
-    write_outputs(train_df, val_df, args.output_dir.strip(), write_jsonl=bool(args.write_jsonl))
+    write_outputs(train_df, val_df, output_dir, write_jsonl=bool(args.write_jsonl))
     if "data_kind" in train_df.columns:
         print("Train data_kind counts:\n", train_df["data_kind"].value_counts().to_string())
     if "data_kind" in val_df.columns and len(val_df) > 0:

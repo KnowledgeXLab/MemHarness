@@ -5,9 +5,10 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2607.28272-b31b1b.svg)](https://arxiv.org/abs/2607.28272)
 [![Hugging Face Paper](https://img.shields.io/badge/🤗%20Paper-2607.28272-yellow)](https://huggingface.co/papers/2607.28272)
 [![Hugging Face Models](https://img.shields.io/badge/🤗%20Models-MemHarness-yellow)](https://huggingface.co/KnowledgeXLab/MemHarness)
+[![Hugging Face Dataset](https://img.shields.io/badge/🤗%20Dataset-MemHarness-yellow)](https://huggingface.co/datasets/KnowledgeXLab/MemHarness)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**[<img src="https://img.shields.io/badge/-arXiv-B31B1B?logo=arxiv&logoColor=white" height="16" valign="middle"> arXiv](https://arxiv.org/abs/2607.28272)** · **[<img src="https://www.alphaxiv.org/favicon.ico" width="16" height="16" valign="middle"> alphaXiv](https://www.alphaxiv.org/abs/2607.28272)** · **[🤗 Paper](https://huggingface.co/papers/2607.28272)** · **[🤗 Models](https://huggingface.co/KnowledgeXLab/MemHarness)** · **[Model Zoo](#-model-zoo)**
+**[<img src="https://img.shields.io/badge/-arXiv-B31B1B?logo=arxiv&logoColor=white" height="16" valign="middle"> arXiv](https://arxiv.org/abs/2607.28272)** · **[<img src="https://www.alphaxiv.org/favicon.ico" width="16" height="16" valign="middle"> alphaXiv](https://www.alphaxiv.org/abs/2607.28272)** · **[🤗 Paper](https://huggingface.co/papers/2607.28272)** · **[Models](https://huggingface.co/KnowledgeXLab/MemHarness)** · **[ Dataset](https://huggingface.co/datasets/KnowledgeXLab/MemHarness)** · **[Model Zoo](#-model-zoo)**
 
 </div>
 
@@ -29,6 +30,7 @@ Inspired by the reconstructive nature of human memory, MemHarness decomposes mem
 
 ## 📰 Updates
 
+- **`2026-08-07`**: 🤗 Cold-start SFT data released on [Hugging Face Datasets](https://huggingface.co/datasets/KnowledgeXLab/MemHarness).
 - **`2026-07-31`**: 🤗 Model weights (cold-start & GRPO-trained) are available on [Hugging Face](https://huggingface.co/KnowledgeXLab/MemHarness).
 - **`2026-07-30`**: 📄 Paper is publicly available on [arXiv](https://arxiv.org/abs/2607.28272).
 - **`2026-07-30`**: 🎉 Codebase is publicly available.
@@ -157,16 +159,30 @@ MemHarness training consists of two stages:
 
 ### Stage 1 — Cold-Start SFT (optional but recommended)
 
-A brief cold-start stage aligns the base model with the interaction format (reasoning, active memory retrieval, and reconstruction) and the memory-summarization format. Build the cold-start data and run SFT:
+A brief cold-start stage aligns the base model with the MemHarness interaction format before GRPO training. **For convenience, we also release cold-start model checkpoints on [Hugging Face](https://huggingface.co/KnowledgeXLab/MemHarness)** — you can skip this stage and use them directly as `MODEL_PATH` in Stage 2.
+
+Cold-start data (200 train + 20 val samples per benchmark, plus GPT-5.1 teacher memory records) is available on **[KnowledgeXLab/MemHarness](https://huggingface.co/datasets/KnowledgeXLab/MemHarness)**. Download and place under `data/MemHarness/`:
+
+```
+data/MemHarness/cold_start/
+├── alfworld/
+│   ├── train.parquet
+│   ├── val.parquet
+│   └── memory_records-gpt-5.1.jsonl
+└── webshop/
+    ├── train.parquet
+    ├── val.parquet
+    └── memory_records-gpt-5.1.jsonl
+```
 
 ```bash
-# Build cold-start data for each benchmark
-python3 scripts/build_alfworld_coldstart_data.py
-python3 scripts/build_webshop_coldstart_data.py
-python3 scripts/build_summarizer_coldstart_data.py
+huggingface-cli download KnowledgeXLab/MemHarness --repo-type dataset --local-dir data/MemHarness
+```
 
-# Run cold-start SFT (set TASK=alfworld or TASK=webshop)
-TASK=webshop bash scripts/cold_start_sft.sh
+Then run SFT (set `TASK=alfworld` or `TASK=webshop`):
+
+```bash
+TASK=alfworld bash scripts/cold_start_sft.sh
 ```
 
 ### Stage 2 — GRPO Training with Memory Reconstruction
@@ -235,7 +251,7 @@ All model weights are hosted on the Hugging Face Hub at **[KnowledgeXLab/MemHarn
 
 ### Cold-Start Models (SFT)
 
-These checkpoints align the base model with the MemHarness interaction format (reasoning, memory retrieval, and reconstruction) before GRPO training.
+These checkpoints align the base model with the MemHarness interaction format before GRPO training. **You can use them directly** as `MODEL_PATH` in `run_scripts/train_alfworld.sh` / `train_webshop.sh` without running cold-start SFT.
 
 | Checkpoint | Base Architecture | Params | Hugging Face |
 | --- | --- | --- | --- |

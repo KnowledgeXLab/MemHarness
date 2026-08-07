@@ -521,7 +521,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     p.add_argument(
         "--memory-jsonl",
-        default="./data/MemHarness/cold_start/webshop/webshop_train_memory_records-gpt-5.1.jsonl",
+        default="./data/MemHarness/cold_start/webshop/memory_records-gpt-5.1.jsonl",
         help="Optional memory records JSONL (gpt teacher).",
     )
     p.add_argument(
@@ -533,11 +533,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-fraction", type=float, default=0.02)
     p.add_argument("--max-episodes", type=int, default=0, help="0 = all episodes.")
-    p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
+    p.add_argument("--output-dir", default="./data/MemHarness/cold_start/webshop", help="Write train.parquet and val.parquet here.")
     p.add_argument(
         "--output",
-        default="./data/MemHarness/cold_start/webshop/webshop_coldstart.parquet",
-        help="Single combined parquet path (if set, ignores val split). Use \"\" with --output-dir for train/val split.",
+        default="",
+        help="Single combined parquet path (if set, ignores val split).",
     )
     p.add_argument("--write-jsonl", default=True, help="Also write JSONL next to parquet.")
 

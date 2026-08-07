@@ -494,7 +494,7 @@ def build_messages_for_episode(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--train-json", default="./data/alfworld_train.json", help="Path to alfworld_train.json (list of episodes).")
-    p.add_argument("--memory-jsonl", default="./data/alfworld_train_memory_records-gpt-5.1.jsonl", help="Optional memory records JSONL (gpt teacher).")
+    p.add_argument("--memory-jsonl", default="./data/MemHarness/cold_start/alfworld/memory_records-gpt-5.1.jsonl", help="Optional memory records JSONL (gpt teacher).")
     p.add_argument(
         "--memory-group-key",
         default="dataset_item_id",
@@ -512,8 +512,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-fraction", type=float, default=0.02)
     p.add_argument("--max-episodes", type=int, default=0, help="0 = all episodes (debug).")
-    p.add_argument("--output-dir", default="", help="Write train.parquet and val.parquet here.")
-    p.add_argument("--output", default="./data/MemHarness/cold_start/alfworld/alfworld_coldstart.parquet", help="Single combined parquet path (if set, ignores val split).")
+    p.add_argument("--output-dir", default="./data/MemHarness/cold_start/alfworld", help="Write train.parquet and val.parquet here.")
+    p.add_argument("--output", default="", help="Single combined parquet path (if set, ignores val split).")
     p.add_argument(
         "--write-jsonl",
         default=True,

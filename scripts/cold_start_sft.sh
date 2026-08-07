@@ -22,8 +22,8 @@ export EXP_NAME="${TASK}-qwen2.5-7b-cold-start"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-TRAIN_FILES="data/MemHarness/cold_start/${TASK}/mixed_sample200/train.parquet"
-VAL_FILES="data/MemHarness/cold_start/${TASK}/mixed_sample200/val.parquet"
+TRAIN_FILES="data/MemHarness/cold_start/${TASK}/train.parquet"
+VAL_FILES="data/MemHarness/cold_start/${TASK}/val.parquet"
 # Base model: Hugging Face model id or a local path.
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}"
 
