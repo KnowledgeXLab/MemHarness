@@ -81,7 +81,7 @@ conda create -n memharness python==3.12 -y
 conda activate memharness
 
 # 3. Install vLLM
-pip3 install vllm==0.8.4
+pip3 install vllm==0.11.0
 
 # 4. Install Flash Attention 2
 pip3 install flash-attn --no-build-isolation --no-cache-dir
