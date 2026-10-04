@@ -119,7 +119,7 @@ conda create -n memharness-webshop --clone memharness
 conda activate memharness-webshop
 
 cd ./agent_system/environments/env_package/webshop/webshop
-./setup.sh -d all
+bash ./setup.sh -d all
 ```
 
 > WebShop upstream recommends Python ≤ 3.10. If `./setup.sh` fails in the cloned environment, create a fresh `python==3.10` environment and reinstall MemHarness instead (see [verl-agent](https://github.com/langfengQ/verl-agent#2-webshop)).
